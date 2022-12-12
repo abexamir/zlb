@@ -1,0 +1,46 @@
+# Explicit image and network configuration is required.
+nameOverride: ""
+fullnameOverride: ""
+image:
+  repository: ghcr.io/abexamir/zlb
+  tag: "0.4.0"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+lbNode:
+  url: ""
+  allowPrivateHTTP: false
+  existingSecret: ""
+  tokenKey: token
+  # Optional existing ConfigMap containing a CA certificate under ca.crt.
+  caConfigMap: ""
+nodeCIDR: ""
+interval: 5
+pools:
+  default_pool: public
+  blocked_ports: [9808]
+  pools:
+    - name: public
+      ips: [198.51.100.10]
+resources:
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+# Optional controller-driven provisioning of a dedicated Debian/Ubuntu VM.
+bootstrap:
+  enabled: false
+  existingSecret: ""
+  # Secret keys: private_key and known_hosts. Host keys are strictly verified.
+  sshHost: ""
+  sshUser: root
+  sshPort: 22
+  publicInterface: ""
+  publicIPs: []

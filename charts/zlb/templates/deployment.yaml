@@ -1,0 +1,132 @@
+{{- if and (hasPrefix "http://" .Values.lbNode.url) (not .Values.lbNode.allowPrivateHTTP) }}
+{{- fail "HTTP load balancer node requires lbNode.allowPrivateHTTP=true on a trusted private path" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zlb.fullname" . }}
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1200
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "zlb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "zlb.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/pools: {{ .Values.pools | mustToJson | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "zlb.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          {{- $repository := required "image.repository is required" .Values.image.repository }}
+          image: {{ if .Values.image.digest }}{{ printf "%s@%s" $repository .Values.image.digest | quote }}{{ else }}{{ printf "%s:%s" $repository .Values.image.tag | quote }}{{ end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ printf "--lb-node=%s" (required "lbNode.url is required" .Values.lbNode.url) | quote }}
+            {{- if .Values.lbNode.allowPrivateHTTP }}
+            - --allow-private-http
+            {{- end }}
+            - --ready-file=/tmp/zlb-ready
+            - --token-file=/var/run/zlb/token
+            - --pool-config=/etc/zlb/pools.json
+            - {{ printf "--node-cidr=%s" (required "nodeCIDR is required" .Values.nodeCIDR) | quote }}
+            - {{ printf "--interval=%v" .Values.interval | quote }}
+            {{- if .Values.lbNode.caConfigMap }}
+            - --ca-file=/var/run/zlb-ca/ca.crt
+            {{- end }}
+            {{- if .Values.bootstrap.enabled }}
+            - --bootstrap-key-file=/var/run/zlb-ssh/private_key
+            - --bootstrap-known-hosts-file=/var/run/zlb-ssh/known_hosts
+            - {{ printf "--bootstrap-ssh-host=%s" (required "bootstrap.sshHost is required" .Values.bootstrap.sshHost) | quote }}
+            - {{ printf "--bootstrap-ssh-user=%s" .Values.bootstrap.sshUser | quote }}
+            - {{ printf "--bootstrap-ssh-port=%v" .Values.bootstrap.sshPort | quote }}
+            - {{ printf "--bootstrap-interface=%s" (required "bootstrap.publicInterface is required" .Values.bootstrap.publicInterface) | quote }}
+            {{- if not .Values.bootstrap.publicIPs }}{{ fail "bootstrap.publicIPs is required" }}{{- end }}
+            {{- range .Values.bootstrap.publicIPs }}
+            - {{ printf "--bootstrap-ip=%s" . | quote }}
+            {{- end }}
+            {{- end }}
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import pathlib,time; assert time.time()-float(pathlib.Path('/tmp/zlb-ready').read_text()) < 30"
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.bootstrap.enabled }}
+            - {name: ssh, mountPath: /var/run/zlb-ssh, readOnly: true}
+            {{- end }}
+            - {name: pools, mountPath: /etc/zlb, readOnly: true}
+            - {name: token, mountPath: /var/run/zlb, readOnly: true}
+            {{- if .Values.lbNode.caConfigMap }}
+            - {name: ca, mountPath: /var/run/zlb-ca, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+        {{- if .Values.bootstrap.enabled }}
+        - name: ssh
+          secret:
+            secretName: {{ required "bootstrap.existingSecret is required" .Values.bootstrap.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
+        - name: pools
+          configMap:
+            name: {{ include "zlb.fullname" . }}-pools
+        - name: token
+          secret:
+            secretName: {{ required "lbNode.existingSecret is required" .Values.lbNode.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.lbNode.tokenKey | quote }}
+                path: token
+        {{- if .Values.lbNode.caConfigMap }}
+        - name: ca
+          configMap:
+            name: {{ .Values.lbNode.caConfigMap }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

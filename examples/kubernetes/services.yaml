@@ -1,0 +1,39 @@
+# An ordinary Service is published at the allocated NodePort, not public port 5432.
+# Create the namespace and matching workload separately.
+apiVersion: v1
+kind: Service
+metadata:
+  name: database
+  namespace: apps
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: database
+  ports:
+    - name: database
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+---
+# Matches the administrator-owned 80/443 reservation in examples/pools.json.
+# Adapt namespace, name, selector and targetPorts to your actual ingress controller.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress
+  namespace: ingress
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: ingress
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP

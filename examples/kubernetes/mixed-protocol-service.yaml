@@ -1,0 +1,25 @@
+# Requires a workload and Kubernetes datapath supporting every configured protocol.
+# Each allocated NodePort becomes its protocol's external published port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mixed-protocol
+  namespace: apps
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: mixed-protocol
+  ports:
+    - name: tcp
+      protocol: TCP
+      port: 5000
+      targetPort: 5000
+    - name: udp
+      protocol: UDP
+      port: 5000
+      targetPort: 5000
+    - name: sctp
+      protocol: SCTP
+      port: 5000
+      targetPort: 5000

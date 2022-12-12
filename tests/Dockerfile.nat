@@ -1,0 +1,7 @@
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends nftables iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY zlb ./zlb
+COPY tests/verify_nat.py ./tests/verify_nat.py
+ENTRYPOINT ["python3", "tests/verify_nat.py"]

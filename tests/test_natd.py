@@ -1,0 +1,222 @@
+import copy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from zlb.addresses import Addresses
+from zlb.model import VERSION, digest, validate_state
+from zlb.natd import Applier, render, stable
+from test_zlb import service, node, endpoint_slice, plan
+
+IP = "198.51.100.10"
+CIDR = "10.0.0.0/24"
+STATE = {"version": VERSION, "listeners": [{"ip": IP, "port": 80, "protocol": "TCP",
+         "source_ranges": [], "backends": [{"ip": "10.0.0.10", "port": 30080}]}]}
+
+
+class ProtocolTests(unittest.TestCase):
+    def test_protocols_share_same_public_port(self):
+        state = copy.deepcopy(STATE)
+        state["listeners"] = [dict(state["listeners"][0], protocol=p) for p in ("TCP", "UDP", "SCTP")]
+        validated = validate_state(state, [IP], CIDR)
+        self.assertEqual(len(validated["listeners"]), 3)
+        text = render(validated, CIDR)
+        for proto in ("tcp", "udp", "sctp"):
+            self.assertIn(f"meta l4proto {proto} {proto} dport 80", text)
+            self.assertIn(f"ct original protocol {proto}", text)
+        with self.assertRaises(ValueError):
+            validate_state({"version": VERSION, "listeners": [state["listeners"][0]] * 2}, [IP], CIDR)
+
+    def test_mixed_protocol_service_and_local_backend_selection(self):
+        svc = service()
+        svc["spec"]["externalTrafficPolicy"] = "Local"
+        svc["spec"]["ports"] = [{"name": p.lower(), "port": 53, "nodePort": 30053, "protocol": p}
+                                for p in ("TCP", "UDP", "SCTP")]
+        slices = []
+        for proto, nodename in [("TCP", "n1"), ("UDP", "n2")]:
+            es = endpoint_slice([{"nodeName": nodename, "conditions": {"ready": True}}])
+            es["ports"] = [{"name": proto.lower(), "protocol": proto, "port": 5353}]
+            slices.append(es)
+        result = plan([svc], [node(), node("n2", "10.20.0.11")], slices)
+        self.assertEqual(result.errors, {})
+        backends = {x["protocol"]: x["backends"] for x in result.state["listeners"]}
+        self.assertEqual(backends["TCP"][0]["ip"], "10.20.0.10")
+        self.assertEqual(backends["UDP"][0]["ip"], "10.20.0.11")
+        self.assertEqual(backends["SCTP"], [])
+
+    def test_validation_rejects_unknown_fields_and_protocol(self):
+        for change in ({"protocol": "ICMP"}, {"port": "80; flush ruleset"}, {"unknown": True}):
+            state = copy.deepcopy(STATE)
+            state["listeners"][0].update(change)
+            with self.assertRaises((ValueError, TypeError)):
+                validate_state(state, [IP], CIDR)
+
+    def test_source_ranges_and_empty_backend_filter_guard(self):
+        state = copy.deepcopy(STATE)
+        state["listeners"][0].update(source_ranges=["192.0.2.0/24"])
+        self.assertIn("ip saddr { 192.0.2.0/24 }", render(state, CIDR))
+        state["listeners"][0]["backends"] = []
+        text = render(state, CIDR)
+        self.assertIn("ct original proto-dst 80 counter drop", text)
+        self.assertNotIn("dnat to", text)
+
+    def test_only_owned_table_and_numeric_generators(self):
+        text = render(STATE, CIDR)
+        self.assertIn("table ip zlb", text)
+        self.assertIn("numgen inc mod 1 vmap", text)
+        self.assertNotIn("flush ruleset", text)
+        for name in ("bad;", "x\nflush ruleset", "X", "a" * 33):
+            with self.assertRaises(ValueError):
+                render(STATE, CIDR, name)
+
+    def test_normalization_ignores_only_kernel_metadata_and_counters(self):
+        self.assertEqual(stable({"handle": 1, "counter": {"packets": 99, "bytes": 200}, "expr": "x"}),
+                         {"counter": {}, "expr": "x"})
+
+
+class FakeIP:
+    def __init__(self):
+        self.values = [("wan0", "192.0.2.1/24")]
+        self.calls = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        if "-j" in args:
+            names = {name for name, _ in self.values} | {"wan0"}
+            if "-4" in args:
+                names = {name for name, _ in self.values}
+            return json.dumps([{"ifname": name, "addr_info": [dict(family="inet", local=cidr.split('/')[0],
+                prefixlen=int(cidr.split('/')[1])) for n, cidr in self.values if n == name]} for name in names])
+        if args[1:3] == ("address", "add"):
+            self.values.append((args[5], args[3]))
+        elif args[1:3] == ("address", "del"):
+            self.values.remove((args[5], args[3]))
+        else:
+            raise AssertionError(args)
+        return ""
+
+
+class AddressTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.journal = Path(self.directory.name) / "addresses.json"
+        self.ip = FakeIP()
+
+    def manager(self, addresses=None):
+        return Addresses(self.ip, "wan0", addresses or [IP], self.journal)
+
+    def test_assign_restart_and_cleanup_only_owned_addresses(self):
+        a = self.manager()
+        a.add()
+        self.assertIn(("wan0", IP + "/32"), self.ip.values)
+        self.assertEqual(self.manager().owned, {IP + "/32"})
+        self.manager().cleanup()
+        self.assertEqual(self.ip.values, [("wan0", "192.0.2.1/24")])
+
+    def test_existing_administrator_address_is_never_removed(self):
+        self.ip.values.append(("wan0", IP + "/29"))
+        a = self.manager()
+        a.add()
+        a.cleanup()
+        self.assertIn(("wan0", IP + "/29"), self.ip.values)
+        self.assertEqual(a.owned, set())
+
+    def test_initially_unaddressed_interface_can_claim_public_ip(self):
+        self.ip.values = []
+        a = self.manager()
+        a.add()
+        self.assertEqual(self.ip.values, [("wan0", IP + "/32")])
+        a.cleanup()
+        self.assertEqual(self.ip.values, [])
+
+    def test_other_interface_conflict_rejected(self):
+        self.ip.values.append(("other0", IP + "/32"))
+        with self.assertRaises(ValueError):
+            self.manager().add()
+
+    def test_interface_change_rejected(self):
+        self.manager().add()
+        with self.assertRaises(ValueError):
+            Addresses(self.ip, "other0", [IP], self.journal)
+
+    def test_journal_write_failure_rolls_back_added_ip(self):
+        a = self.manager()
+        with patch.object(a, "save", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError): a.add()
+        self.assertEqual(a.owned, set())
+        self.assertNotIn(("wan0", IP + "/32"), self.ip.values)
+
+    def test_allowlist_shrink_retires_only_owned_ip(self):
+        self.manager().add()
+        a = self.manager(["198.51.100.11/32"])
+        a.add()
+        a.retire()
+        self.assertNotIn(("wan0", IP + "/32"), self.ip.values)
+        self.assertIn(("wan0", "198.51.100.11/32"), self.ip.values)
+
+    def test_restore_reinstates_removed_and_removes_added_owned_ips(self):
+        a = self.manager()
+        a.add()
+        before = a.owned.copy()
+        a.desired = {"198.51.100.11": "198.51.100.11/32"}
+        a.add(); a.retire(); a.restore(before)
+        self.assertEqual(a.owned, before)
+        self.assertIn(("wan0", IP + "/32"), self.ip.values)
+
+
+class ApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.a = Applier([IP], CIDR, "wan0", self.directory.name)
+        self.a.addresses = Mock(owned=set())
+        self.a.install = Mock()
+        self.a.verify = Mock()
+        self.actual = {"text": "table ip zlb {}", "fingerprint": "new", "comment": "revision"}
+        self.a.snapshot = Mock(side_effect=[None, self.actual])
+
+    def test_validate_check_addresses_commit_verify_and_ack(self):
+        self.assertEqual(self.a.apply(STATE), digest(STATE))
+        self.assertTrue(self.a.install.call_args_list[0].kwargs['check'])
+        self.assertEqual(self.a.install.call_count, 2)
+        self.a.addresses.add.assert_called_once()
+        self.a.addresses.retire.assert_called_once()
+
+    def test_dry_run_failure_never_changes_addresses(self):
+        self.a.install.side_effect = RuntimeError("check failure")
+        with self.assertRaises(RuntimeError): self.a.apply(STATE)
+        self.a.addresses.add.assert_not_called()
+
+    def test_post_commit_failure_restores_previous_table_and_addresses(self):
+        old = {"text": "old table", "fingerprint": "old"}
+        self.a.snapshot.side_effect = [old, self.actual, self.actual, old]
+        self.a.verify.side_effect = RuntimeError("readback failure")
+        with self.assertRaises(RuntimeError): self.a.apply(STATE)
+        self.assertEqual(self.a.install.call_args.args[0], "old table")
+        self.a.addresses.restore.assert_called_once_with(set())
+
+    def test_address_rollback_failure_does_not_skip_firewall_rollback(self):
+        old = {"text": "old table", "fingerprint": "old"}
+        self.a.snapshot.side_effect = [old, self.actual, self.actual, old]
+        self.a.verify.side_effect = RuntimeError("readback failure")
+        self.a.addresses.restore.side_effect = OSError("address failure")
+        with self.assertLogs("zlb.natd", level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "readback failure"):
+                self.a.apply(STATE)
+        self.assertEqual(self.a.install.call_args.args[0], "old table")
+
+    def test_drift_reapplied_and_identical_state_skips_commit(self):
+        self.a.current_digest, self.a.last_fingerprint = digest(STATE), "new"
+        self.a.snapshot.side_effect = [self.actual, self.actual]
+        self.a.apply(STATE)
+        self.assertEqual(self.a.install.call_count, 1)  # dry-run only
+
+    def test_cleanup_requires_ownership_snapshot(self):
+        self.a.snapshot.side_effect = RuntimeError("foreign table")
+        self.a.command = Mock()
+        with self.assertRaises(RuntimeError): self.a.cleanup()
+        self.a.command.assert_not_called()
+        self.a.addresses.cleanup.assert_not_called()
