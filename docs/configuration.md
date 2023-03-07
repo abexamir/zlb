@@ -135,6 +135,11 @@ Run `python3 -m zlb.natd --help` for the CLI.
   recorded as owned.
 - `--reserved-port` may be repeated; the API port is also forbidden. Keep controller
   `blocked_ports` consistent with these restrictions.
+- `--backend-port-range` (default `30000-32767`) limits backend ports to the cluster's
+  NodePort range. The controller only targets NodePorts, so this stops a stolen API token
+  from publishing other node services such as the kubelet, etcd or SSH. Set it to your
+  `--service-node-port-range` when that differs; with SSH bootstrap use
+  `bootstrap.backendPortRange`.
 - `--table` defaults to `zlb`, with 1–32 lowercase letters/digits/underscores starting with
   a letter. The daemon refuses to overwrite a table without its schema ownership marker.
 - `--cleanup` removes the owned table and journal-owned addresses without a token. Stop

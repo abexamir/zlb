@@ -44,3 +44,6 @@ bootstrap:
   sshPort: 22
   publicInterface: ""
   publicIPs: []
+  # The daemon only forwards to backend ports in this range. Match the cluster's
+  # --service-node-port-range.
+  backendPortRange: "30000-32767"

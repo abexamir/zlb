@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from .http_api import read_token
 from .compiler import active, compile_state
 from .kube import Kubernetes
-from .model import FINALIZER, canonical, digest
+from .model import FINALIZER, NODE_PORTS, canonical, digest, port_range
 from .pools import PoolConfig
 
 LOG = logging.getLogger(__name__)
@@ -99,6 +99,8 @@ def main():
     parser.add_argument("--bootstrap-ssh-port", type=int, default=22)
     parser.add_argument("--bootstrap-interface")
     parser.add_argument("--bootstrap-ip", action="append")
+    parser.add_argument("--bootstrap-backend-port-range", type=port_range, default=NODE_PORTS,
+                        help="NodePort range the bootstrapped daemon accepts as backends")
     parser.add_argument("--ready-file")
     args = parser.parse_args()
     if not args.lb_node.startswith("https://") and not (args.allow_private_http and args.lb_node.startswith("http://")):
@@ -118,7 +120,7 @@ def main():
         bootstrap = SSHBootstrap(args.bootstrap_ssh_host or endpoint.hostname, args.bootstrap_ssh_user,
             args.bootstrap_key_file, args.bootstrap_known_hosts_file, args.token_file,
             endpoint.hostname, endpoint.port or 9808, args.bootstrap_ip, args.bootstrap_interface,
-            args.node_cidr, args.bootstrap_ssh_port)
+            args.node_cidr, args.bootstrap_ssh_port, backend_ports=args.bootstrap_backend_port_range)
     ready = Path(args.ready_file) if args.ready_file else None
     while True:
         try:

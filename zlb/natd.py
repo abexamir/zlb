@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer
 
 from .addresses import Addresses
 from .http_api import make_handler, read_token
-from .model import VERSION, digest, validate_state
+from .model import NODE_PORTS, VERSION, digest, port_range, validate_state
 
 LOG = logging.getLogger(__name__)
 
@@ -75,10 +75,11 @@ def stable(value):
 
 class Applier:
     def __init__(self, allowed_ips, node_cidr, interface, state_dir="/var/lib/zlb",
-                 forbidden_ports=(), table="zlb"):
+                 forbidden_ports=(), table="zlb", backend_ports=NODE_PORTS):
         self.table = table_name(table)
         self.node_cidr = str(ipaddress.IPv4Network(node_cidr))
         self.forbidden_ports = forbidden_ports
+        self.backend_ports = backend_ports
         self.addresses = Addresses(self.command, interface, allowed_ips, Path(state_dir) / f"{table}-addresses.json")
         self.allowed_ips = sorted(self.addresses.desired)
         if not self.allowed_ips:
@@ -146,7 +147,8 @@ class Applier:
             self.apply({"version": VERSION, "listeners": []})
 
     def apply(self, state):
-        state = validate_state(state, self.allowed_ips, self.node_cidr, self.forbidden_ports)
+        state = validate_state(state, self.allowed_ips, self.node_cidr, self.forbidden_ports,
+                               self.backend_ports)
         revision = digest(state)
         candidate = render(state, self.node_cidr, self.table, self.allowed_ips)
         with self.lock:
@@ -201,13 +203,16 @@ def main():
     parser.add_argument("--table", default="zlb")
     parser.add_argument("--state-dir", default="/var/lib/zlb")
     parser.add_argument("--reserved-port", type=int, action="append", default=[])
+    parser.add_argument("--backend-port-range", type=port_range, default=NODE_PORTS,
+                        help="Inclusive FIRST-LAST range backends may use; match the cluster's "
+                             "NodePort range (default 30000-32767)")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
     if not args.cleanup and not args.token_file:
         parser.error("--token-file is required when serving")
     logging.basicConfig(level=logging.INFO)
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
-                      args.reserved_port + [args.port], args.table)
+                      args.reserved_port + [args.port], args.table, args.backend_port_range)
     token = None if args.cleanup else read_token(args.token_file)
     runtime = Path("/run/zlb")
     runtime.mkdir(mode=0o700, exist_ok=True)

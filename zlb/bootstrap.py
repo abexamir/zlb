@@ -10,7 +10,7 @@ import tempfile
 import time
 
 from .http_api import read_token
-from .model import canonical
+from .model import NODE_PORTS, canonical
 
 LOG = logging.getLogger(__name__)
 
@@ -82,9 +82,13 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
 '''
 
 
-def unit(listen, port, ips, interface, node_cidr):
+def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS):
+    first,last=(int(x) for x in backend_ports)
+    if not 1<=first<=last<=65535:
+        raise ValueError('invalid backend port range')
     args=['--listen',str(ipaddress.IPv4Address(listen)),'--port',str(port),
-          '--public-interface',interface,'--node-cidr',str(ipaddress.IPv4Network(node_cidr))]
+          '--public-interface',interface,'--node-cidr',str(ipaddress.IPv4Network(node_cidr)),
+          '--backend-port-range',f'{first}-{last}']
     # Share the privileged daemon's exact validation before generating any shell/systemd input.
     from .addresses import Addresses
     validated=Addresses(None,interface,ips,'/nonexistent/zlb-bootstrap-journal')
@@ -118,7 +122,7 @@ WantedBy=multi-user.target
 
 class SSHBootstrap:
     def __init__(self, host, user, key_file, known_hosts, token_file, listen, port, ips, interface,
-                 node_cidr, ssh_port=22, interval=60):
+                 node_cidr, ssh_port=22, interval=60, backend_ports=NODE_PORTS):
         ipaddress.IPv4Address(host)
         if not user or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in user):
             raise ValueError('invalid SSH user')
@@ -126,7 +130,7 @@ class SSHBootstrap:
             raise ValueError('invalid SSH/API port')
         self.host,self.user,self.key_file,self.known_hosts=host,user,key_file,known_hosts
         self.token_file,self.ssh_port,self.interval=token_file,ssh_port,interval
-        self.unit=unit(listen,port,ips,interface,node_cidr)
+        self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports)
         self.last_success=None
 
     def payload(self):

@@ -51,6 +51,13 @@ class BootstrapTests(unittest.TestCase):
         for address in ('198.51.100.10; reboot','not-an-ip'):
             with self.assertRaises(ValueError):unit('10.0.0.3',9808,[address],'nic1','10.0.0.0/24')
 
+    def test_unit_pins_backend_port_range(self):
+        self.assertIn('--backend-port-range 30000-32767',self.bootstrap.unit)
+        text=unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',(20000,22767))
+        self.assertIn('--backend-port-range 20000-22767',text)
+        for invalid in ((0,10),(32767,30000),(1,65536)):
+            with self.assertRaises(ValueError):unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',invalid)
+
     def test_cleanup_and_daemon_use_same_allowlist(self):
         text=self.bootstrap.unit
         self.assertIn('--ip 198.51.100.10/32',text)
