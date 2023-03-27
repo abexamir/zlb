@@ -32,7 +32,7 @@ separate from the site's VPN or internet-egress router.
 flowchart LR
     Admin[Operator or IaC] -->|Helm values and Secrets| C[Controller in Kubernetes]
     C -->|HTTPS Kubernetes API| K[Services, Nodes, EndpointSlices]
-    C -.->|Optional verified SSH bootstrap| B[Load balancer node]
+    J[Bootstrap hook Job] -.->|Optional verified SSH bootstrap| B[Load balancer node]
     C -->|POST /v1/state + bearer token| D[zlb-natd on load balancer node]
     D -->|ip address commands| A[Public interface addresses]
     D -->|Atomic nft transaction| N[table ip zlb]
@@ -42,9 +42,11 @@ flowchart LR
     Pods -->|Replies through node and LB| Client
 ```
 
-**Helm owns** a Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, and pool
-ConfigMap. It references existing API-token and optional SSH Secrets; it does not create
-those Secrets or a VM. There is no in-cluster API Service for the external daemon.
+**Helm owns** a Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, pool
+ConfigMap, an optional bootstrap hook Job/CronJob, and on Kubernetes 1.30+ a
+ValidatingAdmissionPolicy that limits the controller's Service writes to its own finalizer.
+It references existing API-token and optional SSH Secrets; it does not create those Secrets
+or a VM. There is no in-cluster API Service for the external daemon.
 
 **The controller owns** desired listeners, its cleanup finalizer, warning Events, and
 `status.loadBalancer.ingress`. It reads Service ports; it does not allocate NodePorts,
@@ -103,7 +105,7 @@ kubectl --kubeconfig "$ZLB_KUBECONFIG" --context "$ZLB_CONTEXT" -n zlb-system \
 rm "$ZLB_TOKEN_FILE"
 ```
 
-With SSH bootstrap enabled, the controller copies that token from the Secret to the VM.
+With SSH bootstrap enabled, the bootstrap Job copies that token from the Secret to the VM.
 For a preprovisioned daemon, install the same token securely on the VM before deleting
 its local staging file. Secret storage/encryption and registry pull credentials are operator inputs.
 
@@ -178,11 +180,13 @@ The rendered controller arguments are equivalent to:
 python -m zlb.controller \
   --lb-node=http://10.0.0.3:9808 --allow-private-http \
   --token-file=/var/run/zlb/token --pool-config=/etc/zlb/pools.json \
-  --node-cidr=10.20.0.0/24 --interval=5 --ready-file=/tmp/zlb-ready \
-  --bootstrap-key-file=/var/run/zlb-ssh/private_key \
-  --bootstrap-known-hosts-file=/var/run/zlb-ssh/known_hosts \
-  --bootstrap-ssh-host=10.0.0.3 --bootstrap-ssh-user=root --bootstrap-ssh-port=22 \
-  --bootstrap-interface=eth1 --bootstrap-ip=198.51.100.10/32
+  --node-cidr=10.20.0.0/24 --interval=5 --ready-file=/tmp/zlb-ready
+
+# Separate pre-install/pre-upgrade hook Job (no Kubernetes API token):
+python -m zlb.bootstrap --lb-node=http://10.0.0.3:9808 --token-file=/var/run/zlb/token \
+  --key-file=/var/run/zlb-ssh/private_key --known-hosts-file=/var/run/zlb-ssh/known_hosts \
+  --ssh-host=10.0.0.3 --ssh-user=root --ssh-port=22 --public-interface=eth1 \
+  --ip=198.51.100.10/32 --node-cidr=10.20.0.0/24 --backend-port-range=30000-32767
 ```
 
 The pool JSON is mounted as a ConfigMap directory; API token and SSH data are Secret mounts.
@@ -194,9 +198,8 @@ identifier `zlb.zarrino.tech/gateway` is retained for compatibility.
 
 ## 3. SSH bootstrap (automatic, when enabled)
 
-Before reconciliation, `SSHBootstrap.ensure()` checks whether its last successful check was
-less than 60 seconds ago. Otherwise it creates mode-0600 temporary key and host-key files,
-then invokes OpenSSH with these options:
+The Helm hook Job (or optional CronJob) runs `python -m zlb.bootstrap` once. It creates
+mode-0600 temporary key and host-key files, then invokes OpenSSH with these options:
 
 ```sh
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -448,9 +451,7 @@ policy with Service ports, or inspect the daemon's live nftables rules.
 sequenceDiagram
     participant C as Controller
     participant K as Kubernetes API
-    participant S as SSH bootstrap
     participant L as Load balancer node
-    C->>S: Ensure package/unit/token (when check is due)
     C->>K: GET all Services, Nodes, EndpointSlices (pagination)
     C->>K: PATCH missing cleanup finalizers
     C->>C: Validate pools and compile complete desired snapshot
@@ -886,9 +887,9 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
   over unrelated state. Do not start two controllers for the same table/API endpoint.
 - Python 3.11+ is required on the LB. Bootstrap installs the distro's `python3` if missing;
   it does not upgrade an already installed older Python to the supported minimum.
-- Bootstrap's minute check inspects file content and active service, not package version
-  upgrades or the site's routing correctness. A reconcile failure invalidates its cached
-  success, causing the next loop to recheck bootstrap immediately.
+- Bootstrap inspects file content and active service, not package version upgrades or the
+  site's routing correctness. It runs on Helm install/upgrade and, if `bootstrap.schedule`
+  is set, periodically; the controller never runs it.
 
 ### Protocol and scale limits
 

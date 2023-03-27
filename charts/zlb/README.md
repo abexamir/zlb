@@ -31,7 +31,11 @@ VM are healthy, allowing cleanup finalizers to complete. See [operations](../../
 Set `bootstrap.enabled`, `bootstrap.existingSecret`, `bootstrap.sshHost`,
 `bootstrap.publicInterface` and `bootstrap.publicIPs` for SSH provisioning. The Secret holds
 `private_key` and `known_hosts`; use a dedicated VM key and a trusted provisioned host key.
-The controller then has root-equivalent access only to that explicit VM.
+A `pre-install`/`pre-upgrade` hook Job, not the controller, mounts that root-equivalent key.
+The Job has no Kubernetes API token. Set `bootstrap.schedule` to add a drift-repair CronJob.
+
+With `rbac.restrictServiceWrites` (default `true`) on Kubernetes 1.30+, a
+ValidatingAdmissionPolicy limits the controller's Service updates to its own finalizer.
 
 Chart 0.2.0 / application 0.4.0 names the public-facing forwarding machine the
 **load balancer node**. Update the former `gateway` values block to `lbNode` and

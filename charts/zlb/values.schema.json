@@ -52,6 +52,9 @@
         "backendPortRange": {
           "type": "string",
           "pattern": "^[0-9]{1,5}-[0-9]{1,5}$"
+        },
+        "schedule": {
+          "type": "string"
         }
       }
     },
@@ -68,6 +71,14 @@
         "pools": {
           "type": "array",
           "minItems": 1
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "restrictServiceWrites": {
+          "type": "boolean"
         }
       }
     }

@@ -1,4 +1,8 @@
-"""Opt-in SSH provisioning of a dedicated Debian/Ubuntu load balancer node VM."""
+"""Opt-in SSH provisioning of a dedicated Debian/Ubuntu load balancer node VM.
+
+Runs as a one-shot command (a Helm hook Job or CronJob), never inside the long-running
+controller, so the SSH root key and Kubernetes API credentials never share a process."""
+import argparse
 import hashlib
 import ipaddress
 import json
@@ -7,10 +11,10 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
-import time
+from urllib.parse import urlparse
 
 from .http_api import read_token
-from .model import NODE_PORTS, canonical
+from .model import NODE_PORTS, canonical, port_range
 
 LOG = logging.getLogger(__name__)
 
@@ -122,27 +126,21 @@ WantedBy=multi-user.target
 
 class SSHBootstrap:
     def __init__(self, host, user, key_file, known_hosts, token_file, listen, port, ips, interface,
-                 node_cidr, ssh_port=22, interval=60, backend_ports=NODE_PORTS):
+                 node_cidr, ssh_port=22, backend_ports=NODE_PORTS):
         ipaddress.IPv4Address(host)
         if not user or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in user):
             raise ValueError('invalid SSH user')
         if not 1<=ssh_port<=65535 or not 1<=port<=65535:
             raise ValueError('invalid SSH/API port')
         self.host,self.user,self.key_file,self.known_hosts=host,user,key_file,known_hosts
-        self.token_file,self.ssh_port,self.interval=token_file,ssh_port,interval
+        self.token_file,self.ssh_port=token_file,ssh_port
         self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports)
-        self.last_success=None
 
     def payload(self):
         files={path.name:path.read_text() for path in Path(__file__).parent.glob('*.py')}
         return dict(files=files,token=read_token(self.token_file),unit=self.unit)
 
-    def invalidate(self):
-        self.last_success=None
-
     def ensure(self):
-        if self.last_success is not None and time.monotonic()-self.last_success<self.interval:
-            return
         payload=self.payload()
         # Copy the mounted key to a mode-0600 temporary file for OpenSSH. Never put it in argv.
         with tempfile.TemporaryDirectory(prefix='zlb-ssh-') as directory:
@@ -165,5 +163,39 @@ exec python3 -c '''+shlex.quote(REMOTE)
             expected=hashlib.sha256(canonical(payload)).hexdigest()
             if receipt.get('revision')!=expected:
                 raise RuntimeError('SSH bootstrap revision was not acknowledged')
-        self.last_success=time.monotonic()
         LOG.info('load balancer node SSH bootstrap verified changed=%s',receipt.get('changed'))
+        return receipt
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lb-node", required=True, help="Daemon API URL used by the controller")
+    parser.add_argument("--token-file", required=True)
+    parser.add_argument("--key-file", required=True, help="Dedicated SSH private key for the VM")
+    parser.add_argument("--known-hosts-file", required=True, help="Trusted host key; no TOFU")
+    parser.add_argument("--ssh-host", help="Defaults to the --lb-node host")
+    parser.add_argument("--ssh-user", default="root")
+    parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--public-interface", required=True)
+    parser.add_argument("--ip", action="append", required=True,
+                        help="Daemon public IPv4 allowlist entry, optionally /prefix")
+    parser.add_argument("--node-cidr", required=True)
+    parser.add_argument("--backend-port-range", type=port_range, default=NODE_PORTS)
+    args = parser.parse_args(argv)
+    endpoint = urlparse(args.lb_node)
+    if endpoint.scheme != "http" or not endpoint.hostname:
+        parser.error("SSH bootstrap configures the native HTTP daemon; use a trusted private HTTP endpoint")
+    logging.basicConfig(level=logging.INFO)
+    try:
+        SSHBootstrap(args.ssh_host or endpoint.hostname, args.ssh_user, args.key_file,
+                     args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port or 9808,
+                     args.ip, args.public_interface, args.node_cidr, args.ssh_port,
+                     args.backend_port_range).ensure()
+    except Exception:
+        LOG.exception("load balancer node bootstrap failed")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

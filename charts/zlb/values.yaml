@@ -29,12 +29,17 @@ resources:
   limits:
     cpu: 250m
     memory: 128Mi
+rbac:
+  # Install a ValidatingAdmissionPolicy (Kubernetes 1.30+) that limits the controller's
+  # Service writes to its own finalizer. Skipped automatically when the API is unavailable.
+  restrictServiceWrites: true
 nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
 
-# Optional controller-driven provisioning of a dedicated Debian/Ubuntu VM.
+# Optional SSH provisioning of a dedicated Debian/Ubuntu VM. A pre-install/pre-upgrade hook
+# Job runs it; the controller itself never receives the SSH key.
 bootstrap:
   enabled: false
   existingSecret: ""
@@ -47,3 +52,13 @@ bootstrap:
   # The daemon only forwards to backend ports in this range. Match the cluster's
   # --service-node-port-range.
   backendPortRange: "30000-32767"
+  # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
+  # bootstrap only on Helm install and upgrade.
+  schedule: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 96Mi
