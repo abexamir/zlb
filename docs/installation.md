@@ -118,8 +118,7 @@ fails, the upgrade fails and the CronJob stays suspended. A legacy controller th
 quiesce Job scaled down also stays down until a later upgrade or `helm rollback` succeeds.
 Forwarding rules keep serving meanwhile.
 
-Bootstrap currently targets Debian/Ubuntu with apt and systemd on a trusted private HTTP API
-path (`lbNode.allowPrivateHTTP: true`). Scope the SSH key and the namespace's Secret read
+Bootstrap currently targets Debian/Ubuntu with apt and systemd. Scope the SSH key and the namespace's Secret read
 permissions accordingly. Keep routing, the VM's firewall, upstream address allocation and
 platform lifecycle in IaC. The VM never joins Kubernetes.
 
@@ -133,8 +132,42 @@ With bootstrap disabled, install Python 3.11+, nftables and iproute2 on Linux, e
 forwarding, clone `https://github.com/abexamir/zlb` and copy `zlb/` under `/opt/zlb`, install the token privately, and adapt
 [`examples/systemd/zlb-natd.service`](../examples/systemd/zlb-natd.service).
 Set the public interface, allowed IPs/prefixes, private API address and node CIDR explicitly.
-Protect the API with a trusted private path or an external TLS/mTLS proxy. Native API TLS is
-not implemented. The daemon needs NET_ADMIN/NET_RAW and persistent `/var/lib/zlb` storage.
+Protect the API with HTTPS (see below) or a trusted private path. The daemon needs
+NET_ADMIN/NET_RAW and persistent `/var/lib/zlb` storage.
+
+## Securing the daemon API
+
+The bearer token travels with every request, so prefer HTTPS whenever the path between the
+cluster and the VM is not fully trusted. The daemon serves TLS 1.2+ natively:
+
+- `--tls-cert` and `--tls-key`: the server certificate must carry an IP SAN for the address
+  in `lbNode.url`. Give the controller the issuing CA through `lbNode.caConfigMap`.
+- `--tls-client-ca`: additionally require client certificates signed by exactly this CA
+  (mutual TLS; the system trust store is not consulted). Give the controller its certificate
+  through `lbNode.clientCertSecret`, a `kubernetes.io/tls` Secret.
+- `--allow-from CIDR` (repeatable): close connections from other sources before reading
+  anything. Your node CIDR is a good start when pods reach the VM from node addresses.
+- `--max-connections` (default 16) caps concurrent connections, and each request must
+  arrive within 30 seconds, so unauthenticated clients cannot exhaust the daemon.
+
+With SSH bootstrap, use an `https://` `lbNode.url` and set `bootstrap.tlsSecret` to a
+Secret holding `tls.crt` and `tls.key`. Add `ca.crt` and `bootstrap.requireClientCertificates:
+true` for mutual TLS, and list sources in `bootstrap.apiAllowFrom`:
+
+```yaml
+lbNode:
+  url: https://10.0.0.3:9808
+  existingSecret: zlb-lb-node-token
+  caConfigMap: zlb-lb-node-ca
+  clientCertSecret: zlb-controller-client
+bootstrap:
+  tlsSecret: zlb-lb-node-tls
+  requireClientCertificates: true
+  apiAllowFrom: [10.0.0.0/24]
+```
+
+Plain HTTP still requires `lbNode.allowPrivateHTTP: true` and should be limited to a
+trusted private network.
 
 ## Routing and protocol compatibility
 

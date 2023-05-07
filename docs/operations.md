@@ -75,8 +75,9 @@ Secret-volume propagation. There is no overlapping-token grace period or hot tok
 in natd. Prefer your existing secret-management process; do not print tokens in logs or
 store them in manifests.
 
-The daemon has no native TLS. Restrict the API to trusted cluster sources and use an
-external TLS/mTLS proxy when the path is not trusted. Applications remain responsible for
+Serve the API over HTTPS with `--tls-cert`/`--tls-key`, optionally requiring client
+certificates with `--tls-client-ca`, and restrict sources with `--allow-from`. See
+[securing the daemon API](installation.md#securing-the-daemon-api). Applications remain responsible for
 their own TLS and authentication; zlb is an L4 forwarding component.
 
 ## Stop and uninstall

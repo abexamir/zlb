@@ -55,6 +55,11 @@ spec:
             {{- if .Values.lbNode.caConfigMap }}
             - --ca-file=/var/run/zlb-ca/ca.crt
             {{- end }}
+            {{- if .Values.lbNode.clientCertSecret }}
+            {{- if not (hasPrefix "https://" .Values.lbNode.url) }}{{ fail "lbNode.clientCertSecret requires an https:// lbNode.url" }}{{ end }}
+            - --client-cert=/var/run/zlb-client/tls.crt
+            - --client-key=/var/run/zlb-client/tls.key
+            {{- end }}
           readinessProbe:
             exec:
               command:
@@ -77,6 +82,9 @@ spec:
             {{- if .Values.lbNode.caConfigMap }}
             - {name: ca, mountPath: /var/run/zlb-ca, readOnly: true}
             {{- end }}
+            {{- if .Values.lbNode.clientCertSecret }}
+            - {name: client, mountPath: /var/run/zlb-client, readOnly: true}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
@@ -96,6 +104,12 @@ spec:
         - name: ca
           configMap:
             name: {{ .Values.lbNode.caConfigMap }}
+        {{- end }}
+        {{- if .Values.lbNode.clientCertSecret }}
+        - name: client
+          secret:
+            secretName: {{ .Values.lbNode.clientCertSecret }}
+            defaultMode: 0440
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

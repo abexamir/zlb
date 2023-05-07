@@ -115,7 +115,8 @@ Run `python3 -m zlb.controller --help` for the CLI.
   exclusive with `--pool-config`.
 - `--node-cidr` must describe node InternalIPs, not Pod or Service CIDRs.
 - `--interval` defaults to 5 seconds with jitter and must be at least 1 second.
-- `--ca-file` configures HTTPS trust; `--allow-private-http` explicitly permits HTTP.
+- `--ca-file` configures HTTPS trust; `--client-cert`/`--client-key` present a client
+  certificate for mutual TLS; `--allow-private-http` explicitly permits HTTP.
 
 ## Load balancer node options
 
@@ -140,6 +141,10 @@ Run `python3 -m zlb.natd --help` for the CLI.
   from publishing other node services such as the kubelet, etcd or SSH. Set it to your
   `--service-node-port-range` when that differs; with SSH bootstrap use
   `bootstrap.backendPortRange`.
+- `--tls-cert`/`--tls-key` serve HTTPS; `--tls-client-ca` requires client certificates
+  from that CA. `--allow-from` (repeatable) limits API sources and `--max-connections`
+  (default 16) caps concurrent connections. See
+  [securing the daemon API](installation.md#securing-the-daemon-api).
 - `--table` defaults to `zlb`, with 1–32 lowercase letters/digits/underscores starting with
   a letter. The daemon refuses to overwrite a table without its schema ownership marker.
 - `--cleanup` removes the owned table and journal-owned addresses without a token. Stop

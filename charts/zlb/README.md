@@ -18,7 +18,9 @@ Start with [example values](../../examples/helm-values.yaml). Set `image.reposit
 `image.tag` or `image.digest`, `lbNode.url`, `lbNode.existingSecret`, `nodeCIDR` and `pools`.
 The existing Secret must contain the same token installed on the VM, under `token` by default.
 Use `lbNode.tokenKey` for another key. Set `lbNode.caConfigMap` for a private HTTPS CA
-(ConfigMap key `ca.crt`). HTTP requires explicit `lbNode.allowPrivateHTTP: true`.
+(ConfigMap key `ca.crt`) and `lbNode.clientCertSecret` for mutual TLS. With bootstrap,
+`bootstrap.tlsSecret`, `bootstrap.requireClientCertificates` and `bootstrap.apiAllowFrom`
+configure the daemon's listener. HTTP requires explicit `lbNode.allowPrivateHTTP: true`.
 
 One controller replica and Recreate strategy are intentional: each push replaces the complete
 external load balancer node state. Namespaced installations have separate cluster-RBAC names; they still

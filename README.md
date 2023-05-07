@@ -130,8 +130,8 @@ Source preservation through the load balancer node does not prevent a CNI from p
 under `externalTrafficPolicy: Cluster`. Use `Local` and verify the complete packet path when
 workloads require the original client address.
 
-There is no IPv6, leader election, active backend probing, native API TLS, or general
-same-subnet hairpin solution. Run one controller for one load balancer node state. Daemon process
+There is no IPv6, leader election, active backend probing, or general same-subnet hairpin
+solution. The daemon API supports native TLS and mutual TLS. Run one controller for one load balancer node state. Daemon process
 restarts preserve installed rules; a normal systemd stop explicitly cleans them up.
 See [architecture](docs/architecture.md) for failure behavior and address ownership.
 
