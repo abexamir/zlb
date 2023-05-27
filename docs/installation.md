@@ -129,11 +129,26 @@ Helm, whose bootstrap hook completes host setup. The chart itself does not creat
 ## Preprovisioned daemon
 
 With bootstrap disabled, install Python 3.11+, nftables and iproute2 on Linux, enable IPv4
-forwarding, clone `https://github.com/abexamir/zlb` and copy `zlb/` under `/opt/zlb`, install the token privately, and adapt
-[`examples/systemd/zlb-natd.service`](../examples/systemd/zlb-natd.service).
-Set the public interface, allowed IPs/prefixes, private API address and node CIDR explicitly.
-Protect the API with HTTPS (see below) or a trusted private path. The daemon needs
-NET_ADMIN/NET_RAW and persistent `/var/lib/zlb` storage.
+forwarding, clone `https://github.com/abexamir/zlb` and copy `zlb/` under `/opt/zlb`.
+Create the `zlb-natd` system user, install the token as `root:zlb-natd` mode 0640, and
+adapt [`examples/systemd/zlb-natd.service`](../examples/systemd/zlb-natd.service); its
+header shows the commands. Set the public interface, allowed IPs/prefixes, private API
+address and node CIDR explicitly. Protect the API with HTTPS (see below) or a trusted
+private path. The daemon runs unprivileged with only `CAP_NET_ADMIN` and needs persistent
+`/var/lib/zlb` storage.
+
+## Load balancer node host protection
+
+IPv4 forwarding makes the VM a router. Without a default-deny forward policy, a neighbour
+on the public network could route packets through it straight into the node CIDR. The
+daemon therefore drops new or invalid connections arriving on `--public-interface` unless
+they were DNATed (zlb listeners or your own DNAT rules). Use `--allow-foreign-forwarding`
+(`bootstrap.allowForeignForwarding`) only if the VM must also route other public traffic.
+
+Services on the VM itself, such as sshd, also answer on the public IPs. Add
+`--isolate-public-ips` (`bootstrap.isolatePublicIPs`) to accept only listeners, replies and
+ping on those addresses. Do not enable it if you administer the VM through a public IP.
+Your own firewall policy still applies on top of both.
 
 ## Securing the daemon API
 

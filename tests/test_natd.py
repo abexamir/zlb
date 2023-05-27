@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
 from zlb.model import NODE_PORTS, VERSION, digest, port_range, validate_state
-from zlb.natd import Applier, render, stable
+from zlb.natd import Applier, host_guards, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
 IP = "198.51.100.10"
@@ -80,6 +80,20 @@ class ProtocolTests(unittest.TestCase):
         text = render(state, CIDR)
         self.assertIn("ct original proto-dst 80 counter drop", text)
         self.assertNotIn("dnat to", text)
+
+    def test_forward_guard_and_optional_public_isolation(self):
+        text = render(STATE, CIDR, public_interface="wan0")
+        forward = text.split("chain forward")[1].split("chain input")[0]
+        self.assertIn('iifname "wan0" ct state new ct status & dnat == 0 counter drop', forward)
+        self.assertIn('iifname "wan0" ct state invalid,untracked counter drop', forward)
+        # Replies of established DNAT flows are accepted before the guard sees them.
+        self.assertLess(forward.index("ct state established,related"), forward.index('iifname "wan0"'))
+        self.assertNotIn("iifname", render(STATE, CIDR))
+        isolated = render(STATE, CIDR, allowed_ips=[IP, "198.51.100.11"], isolate=True).split("chain input")[1]
+        self.assertIn(f"ip daddr {{ {IP}, 198.51.100.11 }} counter drop", isolated)
+        self.assertLess(isolated.index("established,related accept"), isolated.index("counter drop;\n}"))
+        self.assertEqual(list(map(len, host_guards("wan0", [IP], True))), [2, 3])
+        self.assertEqual(list(map(len, host_guards(None, [IP]))), [0, 0])
 
     def test_only_owned_table_and_numeric_generators(self):
         text = render(STATE, CIDR)

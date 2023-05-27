@@ -40,8 +40,8 @@ CLIENT_CODE = '''import socket,sys
 proto=sys.argv[1]
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM if proto=="UDP" else socket.SOCK_STREAM,132 if proto=="SCTP" else 0)
 s.settimeout(1.5)
-if len(sys.argv)>2: s.bind((sys.argv[2],0))
-s.connect(("198.51.100.10",80))
+if len(sys.argv)>2 and sys.argv[2]: s.bind((sys.argv[2],0))
+s.connect((sys.argv[3],int(sys.argv[4])) if len(sys.argv)>4 else ("198.51.100.10",80))
 if proto=="UDP":
  s.send(b"ping\\n"); print(s.recv(4096).decode().strip(),flush=True)
 else:
@@ -61,6 +61,10 @@ def ns(name, *args, **kwargs):
     return command("ip", "netns", "exec", name, *args, **kwargs)
 
 
+NODE_PORT = ("10.20.0.11", 30080)  # reachable only through the load balancer node's forwarding
+LOCAL = (PUBLIC, 8080)              # a load balancer node-local service listening on all addresses
+
+
 class NamespaceApplier(Applier):
     def command(self, *args, input=None):
         return ns("zlb-gw", *args, input=input)
@@ -71,13 +75,13 @@ def outside():
     return stable(result)
 
 
-def request(proto="TCP", source=None):
-    args = ["python3", "-c", CLIENT_CODE, proto] + ([source] if source else [])
+def request(proto="TCP", source=None, target=None):
+    args = ["python3", "-c", CLIENT_CODE, proto, source or ""] + ([target[0], str(target[1])] if target else [])
     return ns("zlb-client", *args, input="ping\n").strip()
 
 
-def denied(proto="TCP", source=None):
-    try: result = request(proto, source)
+def denied(proto="TCP", source=None, target=None):
+    try: result = request(proto, source, target)
     except RuntimeError: return
     raise AssertionError("blocked traffic reached an application: " + result)
 
@@ -125,6 +129,8 @@ def main():
         ns("zlb-gw", "sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward")
         ns("zlb-gw", "nft", "-f", "-", input='table ip sentinel { chain input { type filter hook input priority 0; policy accept; }; }\n')
         baseline = outside()
+        processes.append(subprocess.Popen(["ip", "netns", "exec", "zlb-gw", "python3", "-c", SERVER,
+            "TCP", "8080", "192.0.2.1"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
         for index, name in ((1, "zlb-n1"), (2, "zlb-n2"), (0, "zlb-gw")):
             for proto in ("TCP", "UDP", "SCTP"):
                 process = subprocess.Popen(["ip", "netns", "exec", name, "python3", "-c", SERVER,
@@ -156,6 +162,22 @@ def main():
         except ValueError: pass
         assert a.snapshot()["fingerprint"] == accepted
         print("PASS: backends outside the NodePort range are rejected before any change", flush=True)
+        router = NamespaceApplier([PUBLIC], CIDR, "zlb-wan", temporary.name, guard_forwarding=False)
+        router.apply(state)
+        for proto in ("TCP", "UDP"):
+            assert request(proto, target=NODE_PORT).split()[0] == "10.20.0.11"
+        a.apply(state)
+        for proto in ("TCP", "UDP"):
+            denied(proto, target=NODE_PORT)
+            assert request(proto).split()[1] == CLIENT
+        print("PASS: forward guard stops public clients routing into the node CIDR; listeners still work", flush=True)
+        assert request(target=LOCAL).split()[1] == CLIENT
+        isolated = NamespaceApplier([PUBLIC], CIDR, "zlb-wan", temporary.name, isolate_public=True)
+        isolated.apply(state)
+        denied(target=LOCAL)
+        assert request().split()[1] == CLIENT
+        a.apply(state)
+        print("PASS: optional isolation hides load balancer node-local services on public IPs", flush=True)
         held = subprocess.Popen(["ip", "netns", "exec", "zlb-client", "python3", "-c", CLIENT_CODE, "TCP"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(held)

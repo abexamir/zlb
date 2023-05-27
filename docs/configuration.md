@@ -145,6 +145,10 @@ Run `python3 -m zlb.natd --help` for the CLI.
   from that CA. `--allow-from` (repeatable) limits API sources and `--max-connections`
   (default 16) caps concurrent connections. See
   [securing the daemon API](installation.md#securing-the-daemon-api).
+- `--allow-foreign-forwarding` disables the default guard that drops new forwarded
+  connections from the public interface that were not DNATed. `--isolate-public-ips` drops
+  traffic to the public IPs other than listeners, replies and ping. See
+  [host protection](installation.md#load-balancer-node-host-protection).
 - `--table` defaults to `zlb`, with 1–32 lowercase letters/digits/underscores starting with
   a letter. The daemon refuses to overwrite a table without its schema ownership marker.
 - `--cleanup` removes the owned table and journal-owned addresses without a token. Stop

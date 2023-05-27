@@ -248,7 +248,8 @@ systemctl is-active --quiet zlb-natd.service
 Installed paths:
 
 - `/opt/zlb/zlb/*.py`: package source, mode 0644.
-- `/etc/zlb/token`: API token, mode 0600.
+- `/etc/zlb/token`: API token, `root:zlb-natd` mode 0640.
+- `/etc/zlb/tls.crt`, `tls.key`, `client-ca.crt` (HTTPS only): key `root:zlb-natd` 0640, certificates 0644.
 - `/etc/systemd/system/zlb-natd.service`: generated unit, mode 0644.
 - `/etc/sysctl.d/90-zlb-forwarding.conf`: `net.ipv4.ip_forward=1`, mode 0644.
 - `/var/lib/zlb-bootstrap/revision`: successful payload SHA-256, mode 0600.
@@ -264,27 +265,48 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/zlb
-ExecStart=/usr/bin/python3 -m zlb.natd --listen 10.0.0.3 --port 9808 --public-interface eth1 --node-cidr 10.20.0.0/24 --ip 198.51.100.10/32 --token-file /etc/zlb/token
-ExecStopPost=/usr/bin/python3 -m zlb.natd --listen 10.0.0.3 --port 9808 --public-interface eth1 --node-cidr 10.20.0.0/24 --ip 198.51.100.10/32 --cleanup
+ExecStart=/usr/bin/python3 -m zlb.natd --listen 10.0.0.3 --port 9808 --public-interface eth1 --node-cidr 10.20.0.0/24 --backend-port-range 30000-32767 --ip 198.51.100.10/32 --token-file /etc/zlb/token
+ExecStopPost=/usr/bin/python3 -m zlb.natd --listen 10.0.0.3 --port 9808 --public-interface eth1 --node-cidr 10.20.0.0/24 --backend-port-range 30000-32767 --ip 198.51.100.10/32 --cleanup
 Restart=on-failure
 RestartSec=2
+User=zlb-natd
+Group=zlb-natd
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
 RuntimeDirectory=zlb
 RuntimeDirectoryMode=0700
 StateDirectory=zlb
 StateDirectoryMode=0700
 UMask=0077
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-ProtectHome=true
 ProtectSystem=strict
+ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 [Install]
 WantedBy=multi-user.target
 ```
 
-Systemd creates `/run/zlb` and `/var/lib/zlb` with mode 0700. The unit grants only
-NET_ADMIN/NET_RAW, prohibits privilege escalation, hides home directories and makes most
-of the filesystem read-only. Infrastructure may add routing dependencies or an
+The daemon runs as the unprivileged system user `zlb-natd`, which bootstrap creates, with
+`CAP_NET_ADMIN` as its only capability (plus `CAP_NET_BIND_SERVICE` for an API port below
+1024). Systemd creates `/run/zlb` and `/var/lib/zlb` owned by that user with mode 0700. The
+unit forbids privilege escalation, hides home directories and devices, makes most of the
+filesystem and kernel tunables read-only, and restricts address families and system calls.
+`systemd-analyze security` rates it 2.1 (OK). Infrastructure may add routing dependencies or an
 `ExecStartPost` drop-in without changing the generated unit itself.
 
 On failure bootstrap stops the candidate, restores package/unit/token/marker and reloads
@@ -589,6 +611,8 @@ chain prerouting {
 chain forward {
     type filter hook forward priority -10; policy accept;
     ct state established,related ct status dnat ct original ip daddr 198.51.100.10 ct reply ip saddr 10.20.0.0/24 counter accept;
+    iifname "eth1" ct state invalid,untracked counter drop;
+    iifname "eth1" ct state new ct status & dnat == 0 counter drop;
     ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 ip daddr 10.20.0.0/24 ct status dnat counter accept;
     ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 counter drop;
 }
@@ -611,7 +635,10 @@ How to read it:
   Conntrack keeps a flow on its selected translation. This is not an application-level
   health check or least-connections scheduler.
 - `forward` at **-10** first accepts established/related DNAT traffic originally addressed
-  to an allowed public IP with reply source in the node CIDR. It then accepts translated,
+  to an allowed public IP with reply source in the node CIDR. The `iifname "eth1"` guard
+  then drops new or invalid connections from the public interface that were not DNATed, so
+  the VM cannot be used as a router into the node network (`--allow-foreign-forwarding`
+  disables it). It then accepts translated,
   allowed-source traffic for each listener and drops remaining traffic for that original tuple.
 - `input` at **-10** has the corresponding listener guards, so a denied or empty-backend
   listener cannot fall through to a socket running locally on the LB machine.

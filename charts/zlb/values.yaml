@@ -63,6 +63,13 @@ bootstrap:
   requireClientCertificates: false
   # Optional CIDRs allowed to connect to the daemon API, e.g. your node CIDR.
   apiAllowFrom: []
+  # The daemon drops new connections arriving on the public interface unless they were
+  # DNATed, so the VM cannot be used as a router into the node network. Set true only if
+  # this VM must also forward other traffic from its public side.
+  allowForeignForwarding: false
+  # Drop traffic to the public IPs that is not a listener, a reply or ping, hiding
+  # VM-local services such as sshd. Keep false if you administer the VM via a public IP.
+  isolatePublicIPs: false
   # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
   # bootstrap only on Helm install and upgrade.
   schedule: ""

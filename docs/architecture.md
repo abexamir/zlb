@@ -61,6 +61,9 @@ By default the daemon owns only `table ip zlb`, marked with a schema version and
 digest. Its PREROUTING NAT chain runs at priority -110; INPUT and FORWARD filter chains at
 -10. Unmatched traffic continues through the load balancer node firewall. An accept in this table does
 not override a drop in another base chain. Other tables and host routes are untouched.
+The FORWARD chain also drops new or invalid connections arriving on the public interface
+that were not DNATed, so enabling IPv4 forwarding does not turn the VM into an open router
+into the node CIDR. Optional input isolation hides VM-local services on the public IPs.
 
 Source ACLs gate DNAT. Filter rules check the original conntrack IP, protocol and port, so
 source-denied or empty-backend traffic cannot fall through to a load balancer node-local socket.
