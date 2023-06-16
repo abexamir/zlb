@@ -8,6 +8,7 @@ It suspends the CronJob, deletes the Jobs it started, scales a legacy controller
 waits until none of their pods remain."""
 import argparse
 import logging
+import os
 from pathlib import Path
 import time
 from urllib.error import HTTPError
@@ -35,7 +36,7 @@ def optional(call):
         raise
 
 
-def quiesce(kube, namespace, deployment, cronjob, instance=None, timeout=600, poll=2):
+def quiesce(kube, namespace, deployment, cronjob, instance=None, timeout=600, poll=2, own_pod=None):
     ns = quote(namespace, safe="")
     batch = f"/apis/batch/v1/namespaces/{ns}"
     apps = f"/apis/apps/v1/namespaces/{ns}/deployments/{quote(deployment, safe='')}"
@@ -63,7 +64,8 @@ def quiesce(kube, namespace, deployment, cronjob, instance=None, timeout=600, po
     while True:
         remaining = sorted({pod["metadata"]["name"] for selector in selectors
                             for pod in kube.list_all(f"/api/v1/namespaces/{ns}/pods", labelSelector=selector)
-                            if pod.get("status", {}).get("phase") not in ("Succeeded", "Failed")})
+                            if pod.get("status", {}).get("phase") not in ("Succeeded", "Failed")
+                            and pod["metadata"]["name"] != own_pod})
         if not remaining:
             LOG.info("no other bootstrap writers remain")
             return
@@ -83,7 +85,9 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO)
     namespace = args.namespace or Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read_text().strip()
     try:
-        quiesce(Kubernetes(), namespace, args.deployment, args.cronjob, args.instance, args.timeout)
+        # Never wait for ourselves, even if a selector happens to match this hook's own pod.
+        quiesce(Kubernetes(), namespace, args.deployment, args.cronjob, args.instance, args.timeout,
+                own_pod=os.environ.get("POD_NAME"))
     except Exception:
         LOG.exception("could not stop other bootstrap writers")
         return 1

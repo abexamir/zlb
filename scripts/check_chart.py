@@ -19,11 +19,15 @@ def render():
     return [d for d in yaml.safe_load_all(output) if d]
 
 
-def pod(document):
+def template(document):
     spec = document['spec']
     if document['kind'] == 'CronJob':
         spec = spec['jobTemplate']['spec']
-    return spec['template']['spec']
+    return spec['template']
+
+
+def pod(document):
+    return template(document)['spec']
 
 
 def hook(document, event):
@@ -47,6 +51,16 @@ def main():
         'an upgrade must resume the CronJob that quiesce suspended'
     controller = by_name[('Deployment', 'zlb-controller')]
     assert controller['spec']['replicas'] == 1, 'an upgrade must restore a controller that quiesce scaled down'
+    # quiesce waits for every pod matching a legacy controller's selector, which is the
+    # controller selector rendered here; no hook or bootstrap pod may ever match it.
+    selector = controller['spec']['selector']['matchLabels']
+    for document in documents:
+        if document['kind'] in ('Job', 'CronJob'):
+            labels = template(document)['metadata'].get('labels', {})
+            assert not all(labels.get(k) == v for k, v in selector.items()), \
+                f"{document['metadata']['name']} pods match the controller selector {selector}"
+    env = {e['name']: e for e in pod(quiesce)['containers'][0].get('env', [])}
+    assert env['POD_NAME']['valueFrom']['fieldRef']['fieldPath'] == 'metadata.name'
     for document in documents:
         if document['kind'] not in ('Deployment', 'Job', 'CronJob'):
             continue
