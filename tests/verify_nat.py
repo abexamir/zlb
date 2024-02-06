@@ -11,7 +11,7 @@ from collections import Counter
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from zlb.natd import Applier, render, stable
+from zlb.natd import Applier, listener_id, render, stable
 from zlb.model import VERSION, digest
 
 PUBLIC, CLIENT, CIDR = "198.51.100.10", "192.0.2.2", "10.20.0.0/24"
@@ -155,6 +155,24 @@ def main():
             assert all(x.split()[1] == CLIENT for x in responses), (proto, responses)
             assert Counter(x.split()[0] for x in responses) == {"10.20.0.11": 4, "10.20.0.12": 4}, (proto, responses)
             print(f"PASS: {proto} same-port forwarding, real source IP, even round robin", flush=True)
+        tcp = "c_" + listener_id(state["listeners"][0])
+        connections = a.counters()[tcp][0]
+        assert connections >= 8, connections
+        calls = []
+        original_command = a.command
+        def recording(*args, input=None):
+            calls.append(args)
+            return original_command(*args, input=input)
+        with patch.object(a, "command", side_effect=recording):
+            a.apply(copy.deepcopy(state))
+        assert not any("--check" in c or "--file" in c for c in calls), calls
+        print(f"PASS: unchanged state is acknowledged without nft --check or commit ({len(calls)} read-only calls)", flush=True)
+        rebalanced = copy.deepcopy(state)
+        rebalanced["listeners"][0]["backends"] = rebalanced["listeners"][0]["backends"][:1]
+        a.apply(rebalanced)
+        assert a.counters()[tcp][0] >= connections
+        a.apply(state)
+        print("PASS: per-listener connection counters survive table replacement", flush=True)
         accepted = a.snapshot()["fingerprint"]
         exposed = copy.deepcopy(state)
         exposed["listeners"][0]["backends"] = [{"ip": "10.20.0.11", "port": 22}]

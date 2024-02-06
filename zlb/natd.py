@@ -43,46 +43,90 @@ def host_guards(public_interface, ips, isolate=False):
     return forward, local
 
 
-def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=None, isolate=False):
-    """A complete owned table, committed atomically across NAT and filtering hooks."""
+KEY = "ipv4_addr . inet_proto . inet_service"
+
+
+def listener_id(listener):
+    return digest([listener["ip"], listener["protocol"].lower(), listener["port"]])[:16]
+
+
+def layout(state, ips, public_interface=None, isolate=False):
+    """The owned table's expected shape: rules per chain, elements per map, counter names.
+
+    Lookups go through verdict maps keyed by (IP, protocol, port), so the work per packet is
+    constant instead of one rule per listener, and the table holds one chain per listener
+    instead of one per backend."""
+    forward_guard, input_guard = host_guards(public_interface, ips, isolate)
+    chains = {"prerouting": 1, "forward": bool(ips) + len(forward_guard) + 1,
+              "input": 1 + len(input_guard), "open": 2}
+    counters = set()
+    for listener in state["listeners"]:
+        if listener["backends"]:
+            chains["l_" + listener_id(listener)] = 1
+            counters.add("c_" + listener_id(listener))
+            if listener["source_ranges"]:
+                chains["a_" + listener_id(listener)] = 2
+    maps = {"dispatch": sum(bool(x["backends"]) for x in state["listeners"]), "guard": len(state["listeners"])}
+    return chains, maps, counters
+
+
+def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=None, isolate=False,
+           counters=None):
+    """A complete owned table, committed atomically across NAT and filtering hooks.
+
+    `counters` maps counter names to (packets, bytes) carried over from the table being
+    replaced, so per-listener statistics survive applies."""
     table_name(table)
     node_cidr = str(ipaddress.IPv4Network(node_cidr))
     ips = sorted(allowed_ips if allowed_ips is not None else {x["ip"] for x in state["listeners"]})
     revision = digest(state)
-    pre, filtering, destinations = [], [], []
+    dispatch, guard, objects = [], [], []
     for listener in state["listeners"]:
-        ip, public, proto = listener["ip"], listener["port"], listener["protocol"].lower()
-        name = "l_" + digest([ip, proto, public])[:16]
-        match = f"ip daddr {ip} meta l4proto {proto} {proto} dport {public}"
-        original = (f"ct direction original ct original ip daddr {ip} "
-                    f"ct original protocol {proto} ct original proto-dst {public}")
+        proto, lid = listener["protocol"].lower(), listener_id(listener)
+        key = f"{listener['ip']} . {proto} . {listener['port']}"
         backends = listener["backends"]
-        if backends:
-            sources = listener["source_ranges"]
-            source = "ip saddr { " + ", ".join(sources) + " } " if sources else ""
-            pre.append(f"{match} {source}jump {name}")
-            filtering.append(f"{original} ip daddr {node_cidr} ct status dnat {source}counter accept")
-            verdicts = []
-            for index, backend in enumerate(backends):
-                backend_name = f"{name}_{index}"
-                verdicts.append(f"{index} : jump {backend_name}")
-                destinations.append(f"chain {backend_name} {{ meta l4proto {proto} dnat to {backend['ip']}:{backend['port']}; }}")
-            destinations.append(f"chain {name} {{ numgen inc mod {len(backends)} vmap {{ "
-                                + ", ".join(verdicts) + " }; }")
-        filtering.append(f"{original} counter drop")
-    established = []
-    for ip in ips:
-        established.append(f"ct state established,related ct status dnat ct original ip daddr {ip} "
-                           f"ct reply ip saddr {node_cidr} counter accept")
-    forward_guard, input_guard = host_guards(public_interface, ips, isolate)
+        if not backends:
+            # Nothing to forward to: never let the traffic reach a local socket either.
+            guard.append(f"{key} : drop")
+            continue
+        sources = listener["source_ranges"]
+        source = "ip saddr { " + ", ".join(sources) + " } " if sources else ""
+        packets, octets = (counters or {}).get("c_" + lid, (0, 0))
+        objects.append(f"counter c_{lid} {{ packets {int(packets)} bytes {int(octets)} }}")
+        targets = ", ".join(f"{index} : {backend['ip']} . {backend['port']}" for index, backend in enumerate(backends))
+        # Source ranges gate DNAT; numgen picks a backend round-robin per new connection.
+        objects.append(f'chain l_{lid} {{\n    {source}counter name "c_{lid}" meta l4proto {proto} '
+                       f"dnat ip to numgen inc mod {len(backends)} map {{ {targets} }}\n}}")
+        dispatch.append(f"{key} : jump l_{lid}")
+        if sources:
+            objects.append(f"chain a_{lid} {{\n    ip daddr {node_cidr} ct status dnat {source}counter accept\n"
+                           "    counter drop\n}")
+            guard.append(f"{key} : jump a_{lid}")
+        else:
+            guard.append(f"{key} : jump open")
+    def verdict_map(name, elements):
+        body = f"map {name} {{\n    type {KEY} : verdict\n"
+        if elements:
+            body += "    elements = { " + ", ".join(elements) + " }\n"
+        return body + "}\n"
     def chain(name, declaration, rules):
-        return f"chain {name} {{\n    {declaration}\n" + "".join(f"    {r};\n" for r in rules) + "}\n"
+        head = f"    {declaration}\n" if declaration else ""
+        return f"chain {name} {{\n{head}" + "".join(f"    {r};\n" for r in rules) + "}\n"
+    forward_guard, input_guard = host_guards(public_interface, ips, isolate)
+    original = "ct direction original ct original ip daddr . ct original protocol . ct original proto-dst vmap @guard"
+    established = ([f"ct state established,related ct status dnat ct original ip daddr {{ {', '.join(ips)} }} "
+                    f"ct reply ip saddr {node_cidr} counter accept"] if ips else [])
     return (f'table ip {table} {{\ncomment "zlb:v{VERSION}:{revision}";\n'
-            + "\n".join(destinations) + "\n"
-            + chain("prerouting", "type nat hook prerouting priority -110; policy accept;", pre)
+            + verdict_map("dispatch", dispatch) + verdict_map("guard", guard)
+            + "".join(item + "\n" for item in objects)
+            # A DNATed listener flow must target the node CIDR; anything else for a listener
+            # tuple (denied source, empty backends) is dropped before a local socket sees it.
+            + chain("open", "", [f"ip daddr {node_cidr} ct status dnat counter accept", "counter drop"])
+            + chain("prerouting", "type nat hook prerouting priority -110; policy accept;",
+                    ["ip daddr . meta l4proto . th dport vmap @dispatch"])
             + chain("forward", "type filter hook forward priority -10; policy accept;",
-                    established + forward_guard + filtering)
-            + chain("input", "type filter hook input priority -10; policy accept;", filtering + input_guard)
+                    established + forward_guard + [original])
+            + chain("input", "type filter hook input priority -10; policy accept;", [original] + input_guard)
             + "}\n")
 
 
@@ -125,8 +169,16 @@ class Applier:
         info = next(x["table"] for x in data["nftables"] if "table" in x)
         if not info.get("comment", "").startswith(f"zlb:v{VERSION}:"):
             raise RuntimeError("refusing to modify a table not owned by this zlb schema")
-        return {"text": self.command("nft", "-s", "list", "table", "ip", self.table),
-                "fingerprint": digest(stable(data)), "data": data, "comment": info["comment"]}
+        return {"fingerprint": digest(stable(data)), "data": data, "comment": info["comment"]}
+
+    def text(self):
+        """The owned table as reloadable text, taken only when a commit may need rolling back."""
+        return self.command("nft", "-s", "list", "table", "ip", self.table)
+
+    def counters(self):
+        data = json.loads(self.command("nft", "-j", "list", "counters", "table", "ip", self.table))
+        return {x["counter"]["name"]: (x["counter"]["packets"], x["counter"]["bytes"])
+                for x in data["nftables"] if "counter" in x}
 
     def batch(self, text, previous):
         return (f"delete table ip {self.table}\n" if previous else "") + text
@@ -138,29 +190,29 @@ class Applier:
     def verify(self, state, actual):
         if actual is None or actual["comment"] != f"zlb:v{VERSION}:{digest(state)}":
             raise RuntimeError("nftables did not acknowledge the expected revision")
-        chains = {x["chain"]["name"] for x in actual["data"]["nftables"] if "chain" in x}
-        expected = {"input", "forward", "prerouting"}
-        for item in state["listeners"]:
-            if item["backends"]:
-                name = "l_" + digest([item["ip"], item["protocol"].lower(), item["port"]])[:16]
-                expected.add(name)
-                expected.update(f"{name}_{i}" for i in range(len(item["backends"])))
-        if chains != expected:
+        chains, rules, maps, counters = {}, {}, {}, set()
+        for item in actual["data"]["nftables"]:
+            if "chain" in item:
+                chains[item["chain"]["name"]] = item["chain"]
+            elif "rule" in item:
+                rules[item["rule"]["chain"]] = rules.get(item["rule"]["chain"], 0) + 1
+            elif "map" in item:
+                maps[item["map"]["name"]] = len(item["map"].get("elem", []))
+            elif "counter" in item:
+                counters.add(item["counter"]["name"])
+        expected_chains, expected_maps, expected_counters = layout(
+            state, self.allowed_ips, self.guard_interface, self.isolate_public)
+        if set(chains) != set(expected_chains):
             raise RuntimeError("nftables chain readback differs from desired state")
-        objects = actual["data"]["nftables"]
-        nonempty = sum(bool(item["backends"]) for item in state["listeners"])
-        expected_rules = (len(self.allowed_ips) + 2 * len(state["listeners"]) + 4 * nonempty
-                          + sum(len(item["backends"]) for item in state["listeners"])
-                          + sum(map(len, host_guards(self.guard_interface, self.allowed_ips, self.isolate_public))))
-        if sum("rule" in item for item in objects) != expected_rules:
+        if any(rules.get(name, 0) != count for name, count in expected_chains.items()):
             raise RuntimeError("nftables rule count differs from desired state")
-        for item in objects:
-            chain = item.get("chain", {})
-            if chain.get("name") in {"prerouting", "forward", "input"}:
-                name = chain["name"]
-                if (chain.get("hook") != name or chain.get("prio") != (-110 if name == "prerouting" else -10)
-                        or chain.get("type") != ("nat" if name == "prerouting" else "filter")):
-                    raise RuntimeError("nftables hook readback differs from desired state")
+        if maps != expected_maps or counters != expected_counters:
+            raise RuntimeError("nftables map or counter readback differs from desired state")
+        for name in ("prerouting", "forward", "input"):
+            chain = chains[name]
+            if (chain.get("hook") != name or chain.get("prio") != (-110 if name == "prerouting" else -10)
+                    or chain.get("type") != ("nat" if name == "prerouting" else "filter")):
+                raise RuntimeError("nftables hook readback differs from desired state")
 
     def initialize(self):
         self.command("nft", "--version")
@@ -176,31 +228,37 @@ class Applier:
         state = validate_state(state, self.allowed_ips, self.node_cidr, self.forbidden_ports,
                                self.backend_ports)
         revision = digest(state)
-        candidate = render(state, self.node_cidr, self.table, self.allowed_ips, self.guard_interface,
-                           self.isolate_public)
         with self.lock:
             previous = self.snapshot()
             before_addresses = self.addresses.owned.copy()
+            if previous and self.current_digest == revision and previous["fingerprint"] == self.last_fingerprint:
+                # The verified table is unchanged and has not drifted: the controller re-sends
+                # its full state every tick, so skip rendering, checking and committing.
+                try:
+                    self.addresses.add()
+                    self.addresses.retire()
+                except Exception:
+                    self.restore_addresses(before_addresses)
+                    raise
+                return revision
+            candidate = render(state, self.node_cidr, self.table, self.allowed_ips, self.guard_interface,
+                               self.isolate_public, self.counters() if previous else None)
             # Validation happens before either interface or firewall changes.
             self.install(candidate, previous, check=True)
+            rollback = self.text() if previous else None
             try:
                 self.addresses.add()
-                if not (previous and self.current_digest == revision and
-                        previous["fingerprint"] == self.last_fingerprint):
-                    self.install(candidate, previous)
+                self.install(candidate, previous)
                 actual = self.snapshot()
                 self.verify(state, actual)
                 self.addresses.retire()
             except Exception:
                 self.current_digest, self.last_fingerprint = None, None
-                try:
-                    self.addresses.restore(before_addresses)
-                except Exception:
-                    LOG.exception("ADDRESS ROLLBACK FAILED; operator attention required")
+                self.restore_addresses(before_addresses)
                 try:
                     now = self.snapshot()
                     if previous:
-                        self.install(previous["text"], now)
+                        self.install(rollback, now)
                         restored = self.snapshot()
                         if restored["fingerprint"] != previous["fingerprint"]:
                             raise RuntimeError("nftables rollback readback mismatch")
@@ -212,6 +270,12 @@ class Applier:
             self.current_digest, self.last_fingerprint = revision, actual["fingerprint"]
             LOG.info("applied revision=%s listeners=%d", revision, len(state["listeners"]))
             return revision
+
+    def restore_addresses(self, owned):
+        try:
+            self.addresses.restore(owned)
+        except Exception:
+            LOG.exception("ADDRESS ROLLBACK FAILED; operator attention required")
 
     def cleanup(self):
         if self.snapshot():

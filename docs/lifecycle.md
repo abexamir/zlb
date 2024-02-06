@@ -574,19 +574,23 @@ duplicate `(IP, protocol, public port)` listeners, and its API port or extra res
 
 Under a thread lock, apply executes this order:
 
-1. Validate and normalize state, then render the complete candidate table.
-2. Snapshot only the owned table and remember owned addresses.
-3. Validate the entire transaction with `nft --check --file -`.
-4. Add missing configured public addresses and journal each addition.
-5. Commit the whole table with `nft --file -` unless digest and readback fingerprint are unchanged.
-6. Read back the ownership digest, expected chains, hook types/priorities and rule count;
-   compute the actual-table fingerprint used for drift detection.
+1. Validate and normalize state.
+2. Read back only the owned table (`nft -j -s list table`) and remember owned addresses.
+3. If the digest equals the last acknowledged one and the table's fingerprint has not
+   drifted, re-assert interface addresses and acknowledge. Nothing is rendered, checked or
+   committed; this is the usual case, because the controller re-sends its state every tick.
+4. Otherwise read the per-listener counters, render the candidate with those values, and
+   validate the entire transaction with `nft --check --file -`.
+5. Save the current table as text for rollback, add missing configured public addresses and
+   journal each addition, then commit the whole table with `nft --file -`.
+6. Read back the ownership digest, hook types/priorities, chains, rules per chain, map
+   element counts and counters; compute the fingerprint used for drift detection.
 7. Retire obsolete owned IPs; only then return the digest acknowledgement.
 
 When replacing a table, the stdin transaction contains `delete table ip zlb` followed by
 the new table. This is one atomic nftables transaction, not a ruleset flush. Each subprocess
-has a 30-second timeout. Unchanged state is still checked/read back, and drift in the owned
-table triggers reinstallation; counters/handles are excluded from the drift fingerprint.
+has a 30-second timeout. Drift in the owned table triggers reinstallation; counter values
+and handles are excluded from the drift fingerprint.
 
 If any mutation step fails, the daemon attempts to restore the previous address ownership
 and table, and verifies the restored fingerprint. Rollback failures are logged explicitly;
@@ -601,53 +605,67 @@ The source uses `meta l4proto`; nft's printed readback may normalize equivalent 
 ```nft
 table ip zlb {
 comment "zlb:v2:b47b6f77f71c5c846fa08c2d218becc86ee2d2290ce42356daa399388b09b231";
-chain l_2671d531e4b39b30_0 { meta l4proto tcp dnat to 10.20.0.11:31543; }
-chain l_2671d531e4b39b30_1 { meta l4proto tcp dnat to 10.20.0.12:31543; }
-chain l_2671d531e4b39b30 { numgen inc mod 2 vmap { 0 : jump l_2671d531e4b39b30_0, 1 : jump l_2671d531e4b39b30_1 }; }
+map dispatch {
+    type ipv4_addr . inet_proto . inet_service : verdict
+    elements = { 198.51.100.10 . tcp . 31543 : jump l_2671d531e4b39b30 }
+}
+map guard {
+    type ipv4_addr . inet_proto . inet_service : verdict
+    elements = { 198.51.100.10 . tcp . 31543 : jump open }
+}
+counter c_2671d531e4b39b30 { packets 0 bytes 0 }
+chain l_2671d531e4b39b30 {
+    counter name "c_2671d531e4b39b30" meta l4proto tcp dnat ip to numgen inc mod 2 map { 0 : 10.20.0.11 . 31543, 1 : 10.20.0.12 . 31543 }
+}
+chain open {
+    ip daddr 10.20.0.0/24 ct status dnat counter accept;
+    counter drop;
+}
 chain prerouting {
     type nat hook prerouting priority -110; policy accept;
-    ip daddr 198.51.100.10 meta l4proto tcp tcp dport 31543 jump l_2671d531e4b39b30;
+    ip daddr . meta l4proto . th dport vmap @dispatch;
 }
 chain forward {
     type filter hook forward priority -10; policy accept;
-    ct state established,related ct status dnat ct original ip daddr 198.51.100.10 ct reply ip saddr 10.20.0.0/24 counter accept;
+    ct state established,related ct status dnat ct original ip daddr { 198.51.100.10 } ct reply ip saddr 10.20.0.0/24 counter accept;
     iifname "eth1" ct state invalid,untracked counter drop;
     iifname "eth1" ct state new ct status & dnat == 0 counter drop;
-    ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 ip daddr 10.20.0.0/24 ct status dnat counter accept;
-    ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 counter drop;
+    ct direction original ct original ip daddr . ct original protocol . ct original proto-dst vmap @guard;
 }
 chain input {
     type filter hook input priority -10; policy accept;
-    ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 ip daddr 10.20.0.0/24 ct status dnat counter accept;
-    ct direction original ct original ip daddr 198.51.100.10 ct original protocol tcp ct original proto-dst 31543 counter drop;
+    ct direction original ct original ip daddr . ct original protocol . ct original proto-dst vmap @guard;
 }
 }
 ```
 
 How to read it:
 
+- Lookups use verdict maps keyed by `(IP, protocol, port)`, so each packet costs one map
+  lookup however many listeners exist, and the table has one chain per listener rather
+  than one per backend.
 - `prerouting` is a NAT hook at priority **-110**, before ordinary dstnat priority -100.
-  Matching new flows jump into the listener selector. Source ranges, when present, are
-  included in this match.
-- Each listener name is `l_` plus the first 16 hexadecimal characters of the SHA-256 of
-  `[IP, lowercase protocol, public port]`. Each `_0`, `_1`, ... chain chooses one backend.
-- `numgen inc mod N vmap` distributes new flows round-robin among the compiled backends.
-  Conntrack keeps a flow on its selected translation. This is not an application-level
-  health check or least-connections scheduler.
+  New flows look up `@dispatch` and jump to their listener chain `l_<id>`, where `<id>` is
+  the first 16 hexadecimal characters of the SHA-256 of `[IP, lowercase protocol, port]`.
+- In `l_<id>`, source ranges (when present) gate the DNAT, the named counter `c_<id>` counts
+  new connections, and `numgen inc mod N map` picks a backend round-robin. Counter values
+  survive applies. Conntrack keeps a flow on its selected translation. This is not an
+  application-level health check or least-connections scheduler.
 - `forward` at **-10** first accepts established/related DNAT traffic originally addressed
   to an allowed public IP with reply source in the node CIDR. The `iifname "eth1"` guard
   then drops new or invalid connections from the public interface that were not DNATed, so
   the VM cannot be used as a router into the node network (`--allow-foreign-forwarding`
-  disables it). It then accepts translated,
-  allowed-source traffic for each listener and drops remaining traffic for that original tuple.
-- `input` at **-10** has the corresponding listener guards, so a denied or empty-backend
-  listener cannot fall through to a socket running locally on the LB machine.
-- Empty-backend listeners have no selector/DNAT chains and retain their drop guards.
+  disables it). Then the original tuple is looked up in `@guard`: listeners jump to `open`
+  (or `a_<id>` when they have source ranges), which accepts DNATed, allowed traffic to the
+  node CIDR and drops the rest of that tuple.
+- `input` at **-10** uses the same `@guard` lookup, so a denied or empty-backend listener
+  cannot fall through to a socket running locally on the LB machine.
+- Empty-backend listeners have no `@dispatch` entry or `l_` chain; `@guard` maps them to `drop`.
 - Unmatched traffic falls through: these chains have policy accept. A later base chain in
   another table can still drop a packet accepted here. zlb does not replace site firewall policy.
 
 A reserved `198.51.100.10:80` listener generates the same structure, with original public
-port 80 and backend NodePort 30080. UDP/SCTP use their own protocol match and DNAT chains.
+port 80 and backend NodePort 30080. UDP/SCTP use their own map keys and DNAT chains.
 No zlb SNAT, MASQUERADE, OUTPUT NAT, PROXY protocol, TLS termination, application redirect,
 DNS record, or Ingress route is generated.
 
