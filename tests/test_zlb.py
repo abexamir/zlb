@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from zlb.compiler import compile_state
 from zlb.controller import Controller, LoadBalancerNode
 from zlb.kube import Kubernetes
-from zlb.model import CLASS, FINALIZER, PREFIX, digest, validate_state
+from zlb.model import CLASS, FINALIZER, PREFIX, digest, expand, validate_state
 from zlb.pools import PoolConfig
 
 POOL = ["198.51.100.10"]
@@ -36,8 +36,21 @@ def endpoint_slice(endpoints):
         "kubernetes.io/service-name": "web"}}, "endpoints": endpoints}
 
 
+class TestPlan:
+    """A compiled plan plus helpers that read its compact wire state."""
+    def __init__(self, plan):
+        self.plan = plan
+        self.state, self.assignments, self.errors = plan.state, plan.assignments, plan.errors
+
+    def __eq__(self, other):
+        return self.plan == other.plan
+
+    def backends(self, index):
+        return expand(self.state)[index]["backends"]
+
+
 def plan(services, nodes=None, slices=None, pool=None):
-    return compile_state(services, [node()] if nodes is None else nodes, slices or [], pool or POOL, CIDR)
+    return TestPlan(compile_state(services, [node()] if nodes is None else nodes, slices or [], pool or POOL, CIDR))
 
 
 class CompilerTests(unittest.TestCase):
@@ -93,7 +106,7 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(plan([service()], slices=[empty]).errors, {})
         svc = service()
         svc["spec"]["externalTrafficPolicy"] = "Local"
-        self.assertEqual(plan([svc], slices=[empty]).state["listeners"][0]["backends"], [])
+        self.assertEqual(plan([svc], slices=[empty]).backends(0), [])
 
     def test_cluster_filters_nodes(self):
         good = node()
@@ -102,7 +115,7 @@ class CompilerTests(unittest.TestCase):
         excluded["metadata"]["labels"] = {"node.kubernetes.io/exclude-from-external-load-balancers": ""}
         outside["status"]["addresses"][0]["address"] = "10.0.0.1"
         deleting["metadata"]["deletionTimestamp"] = "now"
-        backends = plan([service()], [unready, excluded, outside, good, deleting]).state["listeners"][0]["backends"]
+        backends = plan([service()], [unready, excluded, outside, good, deleting]).backends(0)
         self.assertEqual(backends, [{"ip": "10.20.0.10", "port": 30080}])
 
     def test_local_only_ready_nonterminating_endpoint_nodes(self):
@@ -113,8 +126,8 @@ class CompilerTests(unittest.TestCase):
             {"nodeName": "n2", "conditions": {"ready": False}},
             {"nodeName": "n3", "conditions": {"ready": True, "terminating": True}}])]
         result = plan([svc], [node(), node("n2", "10.20.0.11"), node("n3", "10.20.0.12")], slices)
-        self.assertEqual(result.state["listeners"][0]["backends"], [{"ip": "10.20.0.10", "port": 30080}])
-        self.assertEqual(plan([svc]).state["listeners"][0]["backends"], [])
+        self.assertEqual(result.backends(0), [{"ip": "10.20.0.10", "port": 30080}])
+        self.assertEqual(plan([svc]).backends(0), [])
 
     def test_invalid_service_does_not_block_valid(self):
         mutations = [lambda s: s["spec"]["ports"][0].update(protocol="ICMP"),

@@ -155,6 +155,10 @@ Run `python3 -m zlb.natd --help` for the CLI.
   the daemon first; a per-table lock rejects concurrent local writers. Use the same public
   interface, state directory, table and network settings as the serving process.
 
-The wire envelope is version 2. Each listener contains exactly `ip`, `port`, `protocol`,
-`backends` and `source_ranges`. Load balancer node and controller must run compatible versions.
+The controller sends wire version 3. It lists each distinct set of backend node IPs once in
+`backend_sets`; each listener contains exactly `ip`, `port`, `protocol`, `source_ranges`,
+`backend_port` (the NodePort) and `backend_set` (an index). The request therefore grows with
+listeners plus nodes, not listeners times nodes. The daemon also accepts version 2, in which
+each listener carries a full `backends` list, so **upgrade the daemon before the
+controller**. SSH bootstrap's hook does this automatically.
 Multiple disjoint node CIDRs and multiple load balancer nodes are not implemented.

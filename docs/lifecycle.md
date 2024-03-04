@@ -1,7 +1,7 @@
 # Installation and packet lifecycle
 
 This guide follows the implemented controller and daemon, from installation to packet
-forwarding and removal. It describes application 0.4.0, chart 0.2.0, and wire schema v2.
+forwarding and removal. It describes application 0.4.0, chart 0.2.0, and wire schema v3.
 Commands marked **operator** are run by you or your IaC. Commands marked **automatic**
 are run by zlb. Infrastructure examples illustrate a topology; zlb does not install them.
 All external addresses here are documentation addresses and must be replaced.
@@ -330,7 +330,7 @@ nft -j -s list table ip zlb
 nft -s list table ip zlb
 ```
 
-An existing table must have a `zlb:v2:` ownership comment. Otherwise the daemon refuses to
+An existing table must have a `zlb:v2:` or `zlb:v3:` ownership comment. Otherwise the daemon refuses to
 touch it. If no table exists, it applies an empty v2 snapshot, creating the base chains
 and claiming configured addresses. If a table exists, it leaves it until the next snapshot.
 Then it listens on `10.0.0.3:9808`; `/healthz` reports process liveness only.
@@ -537,21 +537,26 @@ normalized data. The token is carried in the Authorization header, never in the 
 
 ```json
 {
-  "version": 2,
+  "version": 3,
+  "backend_sets": [["10.20.0.11", "10.20.0.12"]],
   "listeners": [
     {
       "ip": "198.51.100.10",
       "port": 31543,
       "protocol": "TCP",
-      "backends": [
-        {"ip": "10.20.0.11", "port": 31543},
-        {"ip": "10.20.0.12", "port": 31543}
-      ],
-      "source_ranges": []
+      "source_ranges": [],
+      "backend_port": 31543,
+      "backend_set": 0
     }
   ]
 }
 ```
+
+Every listener whose backends are the same node set refers to the same `backend_sets`
+entry, so with `Cluster` policy the node list appears once however many Services exist. At
+500 nodes and 2,000 Service ports this is about 0.2 MB, against more than 30 MB for the
+older version 2 format, which listed every backend per listener and which the daemon still
+accepts.
 
 The controller sends `POST /v1/state`, `Content-Type: application/json`, and
 `Authorization: Bearer TOKEN`. It requires the returned `digest` to equal SHA-256 of the
@@ -604,7 +609,7 @@ The source uses `meta l4proto`; nft's printed readback may normalize equivalent 
 
 ```nft
 table ip zlb {
-comment "zlb:v2:b47b6f77f71c5c846fa08c2d218becc86ee2d2290ce42356daa399388b09b231";
+comment "zlb:v3:c2dcd5b46f4577d0602a2aae682c4680e999de90bb29b13c934f1a7b0055353a";
 map dispatch {
     type ipv4_addr . inet_proto . inet_service : verdict
     elements = { 198.51.100.10 . tcp . 31543 : jump l_2671d531e4b39b30 }

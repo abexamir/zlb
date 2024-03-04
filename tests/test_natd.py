@@ -6,13 +6,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
-from zlb.model import NODE_PORTS, VERSION, digest, port_range, validate_state
+from zlb.model import NODE_PORTS, VERSION, digest, expand, port_range, validate_state
 from zlb.natd import Applier, host_guards, layout, listener_id, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
 IP = "198.51.100.10"
 CIDR = "10.0.0.0/24"
-STATE = {"version": VERSION, "listeners": [{"ip": IP, "port": 80, "protocol": "TCP",
+STATE = {"version": 2, "listeners": [{"ip": IP, "port": 80, "protocol": "TCP",
          "source_ranges": [], "backends": [{"ip": "10.0.0.10", "port": 30080}]}]}
 
 
@@ -30,7 +30,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertIn(f"meta l4proto {proto} dnat ip to numgen inc mod 1 map", text)
         self.assertEqual(len({listener_id(x) for x in validated["listeners"]}), 3)
         with self.assertRaises(ValueError):
-            validate_state({"version": VERSION, "listeners": [state["listeners"][0]] * 2}, [IP], CIDR)
+            validate_state({"version": 2, "listeners": [state["listeners"][0]] * 2}, [IP], CIDR)
 
     def test_mixed_protocol_service_and_local_backend_selection(self):
         svc = service()
@@ -44,7 +44,7 @@ class ProtocolTests(unittest.TestCase):
             slices.append(es)
         result = plan([svc], [node(), node("n2", "10.20.0.11")], slices)
         self.assertEqual(result.errors, {})
-        backends = {x["protocol"]: x["backends"] for x in result.state["listeners"]}
+        backends = {x["protocol"]: x["backends"] for x in expand(result.state)}
         self.assertEqual(backends["TCP"][0]["ip"], "10.20.0.10")
         self.assertEqual(backends["UDP"][0]["ip"], "10.20.0.11")
         self.assertEqual(backends["SCTP"], [])
@@ -91,7 +91,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(layout(state, [IP])[1], {"dispatch": 0, "guard": 1})
 
     def test_layout_is_constant_per_packet_and_one_chain_per_listener(self):
-        state = {"version": VERSION, "listeners": [
+        state = {"version": 2, "listeners": [
             {"ip": IP, "port": 30000 + i, "protocol": "TCP", "source_ranges": ["192.0.2.0/24"] if i % 2 else [],
              "backends": [{"ip": f"10.0.0.{b}", "port": 30000 + i} for b in range(1, 51)]} for i in range(20)]}
         chains, maps, counters = layout(state, [IP], "wan0")
