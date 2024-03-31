@@ -82,8 +82,8 @@ owned addresses and acknowledge the digest. Failure attempts to restore and veri
 table and owned addresses. A rollback failure is logged and never acknowledged as success.
 Interface changes and a firewall transaction cannot be one atomic kernel operation.
 
-An unchanged acknowledged snapshot costs one read-only table listing: it is not re-rendered,
-re-checked or committed while its kernel fingerprint still matches.
+An unchanged acknowledged snapshot costs two read-only nft calls (table inventory and table
+readback): it is not re-rendered, re-checked or committed while its kernel fingerprint still matches.
 Owned-rule drift triggers a reapply. A per-table file lock prevents concurrent local writers.
 An unrelated table with the same name is rejected, including during cleanup.
 
