@@ -14,10 +14,10 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [services, nodes]
-    verbs: [get, list]
+    verbs: [get, list, watch]
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
-    verbs: [get, list]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [services, services/status]
     verbs: [patch]

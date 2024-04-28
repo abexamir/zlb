@@ -474,7 +474,8 @@ sequenceDiagram
     participant C as Controller
     participant K as Kubernetes API
     participant L as Load balancer node
-    C->>K: GET all Services, Nodes, EndpointSlices (pagination)
+    K-->>C: Watch events keep trimmed Service, Node and EndpointSlice caches current
+    C->>C: Read the synced caches (no API reads)
     C->>K: PATCH missing cleanup finalizers
     C->>C: Validate pools and compile complete desired snapshot
     C->>L: POST /v1/state (including empty state)
@@ -487,17 +488,28 @@ sequenceDiagram
 
 The controller uses its in-cluster ServiceAccount token and cluster CA. It does not invoke
 `kubectl`, `helm`, `ssh` for reconciliation itself, or any CNI command. SSH is used only by
-optional bootstrap. It reloads pool JSON at the beginning of each tick and lists:
+optional bootstrap. It reloads pool JSON at the beginning of each tick.
+
+Services, Nodes and EndpointSlices come from three watch-backed caches. Each lists its
+resource once (every page must succeed), then follows a watch with bookmarks, and relists
+after an error, an expired resourceVersion, or `--resync` seconds (default 600):
 
 ```text
-GET /api/v1/services?limit=500[&continue=...]
-GET /api/v1/nodes?limit=500[&continue=...]
-GET /apis/discovery.k8s.io/v1/endpointslices?limit=500[&continue=...]
+GET /api/v1/services?limit=500[&continue=...]                  then ?watch=1&resourceVersion=...
+GET /api/v1/nodes?limit=500[&continue=...]                     then ?watch=1&resourceVersion=...
+GET /apis/discovery.k8s.io/v1/endpointslices?limit=500[&...]   then ?watch=1&resourceVersion=...
 ```
 
-Every page must succeed before a snapshot is pushed. These are complete sequential lists,
-not one atomic cross-resource Kubernetes transaction. A later tick converges concurrent changes.
-The interval is five seconds by default with ±10% jitter, after the work finishes.
+The caches keep only the fields the compiler reads. EndpointSlices are reduced to their
+eligible node names and ports, which takes about 22 MiB for 20,000 slices compared with
+about 141 MiB for full objects. A tick reads the caches without API calls, and fails without
+pushing anything unless all three reflect a complete list and an unbroken watch. Objects
+returned by the controller's own patches are written through to the cache. The caches are
+not one atomic cross-resource Kubernetes transaction; a later tick converges concurrent
+changes. The interval is five seconds by default with ±10% jitter, after the work finishes.
+
+Kubernetes before 1.30 drops `ipMode`. A missing `ipMode` is therefore not treated as a
+status difference, so such clusters are not sent a status write on every tick.
 
 For each non-deleting `type: LoadBalancer` Service with no class or zlb's historical class,
 it adds `zlb.zarrino.tech/cleanup`, preserving other finalizers. Foreign explicit classes
@@ -921,8 +933,8 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
 
 ### Partial failure and ownership
 
-- Failed/paginated API reads do not produce an accidental empty snapshot. Kubernetes API
-  changes between complete lists are reconciled later.
+- Failed or incomplete list/watch never produces an accidental empty snapshot: ticks fail
+  until every cache has resynced. Kubernetes API changes are reconciled on later ticks.
 - A per-Service error removes only that Service from the next accepted desired state; a
   global compiler/validation error prevents the entire new state from being pushed.
 - If LB apply succeeds but a status/Event/finalizer patch fails, forwarding may be live with
@@ -952,7 +964,7 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
   trafficDistribution and arbitrary load-balancer annotations. `spec.loadBalancerIP` is rejected;
   use `zlb.zarrino.tech/ip`. No per-Service arbitrary public-port annotation is implemented.
 - The 2 MiB API-body and listener/backend/range limits apply even if Kubernetes permits more
-  objects. The poll loop's work duration adds to the configured sleep interval.
+  objects. The control loop's work duration adds to the configured sleep interval.
 - IPv6, provider-managed IP acquisition, route discovery, DNS management,
   public-port status annotations and automatic upstream ARP correction are not implemented.
 
@@ -963,7 +975,7 @@ Use these files for exact current behavior if implementation changes after this 
 - [Helm Deployment](../charts/zlb/templates/deployment.yaml), [RBAC](../charts/zlb/templates/rbac.yaml),
   [values](../charts/zlb/values.yaml): installation objects, flags, mounts and readiness.
 - [bootstrap.py](../zlb/bootstrap.py): SSH command, installed files, generated unit and rollback.
-- [controller.py](../zlb/controller.py), [kube.py](../zlb/kube.py): polling, HTTP push, finalizers,
+- [controller.py](../zlb/controller.py), [cache.py](../zlb/cache.py), [kube.py](../zlb/kube.py): watch caches, HTTP push, finalizers,
   optimistic patches and Events.
 - [pools.py](../zlb/pools.py), [compiler.py](../zlb/compiler.py): IP/port decisions and backend selection.
 - [model.py](../zlb/model.py): canonical schema, digest and validation limits.

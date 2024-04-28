@@ -17,25 +17,44 @@ class Kubernetes:
             host = f"[{host}]"
         self.url = f"https://{host}:{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}"
 
-    def request(self, method, path, body=None, content_type="application/json"):
+    def open(self, method, path, body=None, content_type="application/json", timeout=15):
         headers = {"Authorization": "Bearer " + self.token_path.read_text().strip(),
                    "Content-Type": content_type}
         request = Request(self.url + path, data=None if body is None else json.dumps(body).encode(),
                           headers=headers, method=method)
-        with urlopen(request, context=self.context, timeout=15) as response:
+        return urlopen(request, context=self.context, timeout=timeout)
+
+    def request(self, method, path, body=None, content_type="application/json"):
+        with self.open(method, path, body, content_type) as response:
             return json.load(response)
 
     def list_all(self, path, **params):
-        items, continuation = [], None
+        return self.list_versioned(path, **params)[0]
+
+    def list_versioned(self, path, **params):
+        """All pages of a list and the resourceVersion the list is consistent at."""
+        items, continuation, version = [], None, None
         while True:
             query = {"limit": 500, **params}
             if continuation:
                 query["continue"] = continuation
             result = self.request("GET", path + "?" + urlencode(query))
             items.extend(result["items"])
+            version = version or result.get("metadata", {}).get("resourceVersion")
             continuation = result.get("metadata", {}).get("continue")
             if not continuation:
-                return items
+                return items, version
+
+    def watch(self, path, version, timeout=240):
+        """Yield watch events from `version` until the server ends the stream."""
+        query = urlencode({"watch": "1", "resourceVersion": version, "allowWatchBookmarks": "true",
+                           "timeoutSeconds": int(timeout)})
+        # The read timeout outlives the server's own so an idle but healthy stream is not cut
+        # short, yet a silently dead connection is still noticed.
+        with self.open("GET", path + "?" + query, timeout=timeout + 60) as response:
+            for line in response:
+                if line.strip():
+                    yield json.loads(line)
 
     def patch(self, svc, field, value, status=False):
         meta = svc["metadata"]
