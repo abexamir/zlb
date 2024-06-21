@@ -4,6 +4,7 @@ import fcntl
 import ipaddress
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -134,6 +135,22 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
                     established + forward_guard + [original])
             + chain("input", "type filter hook input priority -10; policy accept;", [original] + input_guard)
             + "}\n")
+
+
+def cleanup_reason(table, runtime=Path("/run/zlb"), environ=None):
+    """Why `--cleanup` must leave forwarding in place, or None to clean up.
+
+    systemd runs the unit's ExecStopPost cleanup after every stop, including crashes it is
+    about to restart from; $SERVICE_RESULT tells them apart. A managed restart (bootstrap
+    upgrades the daemon) leaves <table>.keep in the runtime directory, which systemd removes
+    once the stop completes."""
+    environ = os.environ if environ is None else environ
+    result = environ.get("SERVICE_RESULT")
+    if result not in (None, "success"):
+        return f"the daemon exited abnormally ({result}) and systemd will restart it"
+    if (Path(runtime) / f"{table}.keep").exists():
+        return "a managed restart asked to keep forwarding"
+    return None
 
 
 def stable(value):
@@ -329,7 +346,10 @@ def main():
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
                       args.reserved_port + [args.port], args.table, args.backend_port_range,
                       not args.allow_foreign_forwarding, args.isolate_public_ips)
-    token = None if args.cleanup else read_token(args.token_file)
+    token = None
+    if not args.cleanup:
+        read_token(args.token_file)  # fail fast on a missing or invalid token
+        token = lambda: read_token(args.token_file)
     tls = None
     if args.tls_cert and not args.cleanup:
         tls = server_context(args.tls_cert, args.tls_key, args.tls_client_ca)
@@ -338,6 +358,10 @@ def main():
     with (runtime / (applier.table + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.cleanup:
+            reason = cleanup_reason(applier.table, runtime)
+            if reason:
+                LOG.warning("keeping zlb forwarding rules and addresses: %s", reason)
+                return
             applier.cleanup()
             return
         applier.initialize()

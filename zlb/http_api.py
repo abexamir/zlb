@@ -13,6 +13,8 @@ LOG = logging.getLogger(__name__)
 
 
 def make_handler(applier, token, apply_error="Load balancer node apply failed; retry later"):
+    """`token` is the expected bearer token, or a callable returning it for each request so a
+    rotated token file takes effect without restarting the daemon."""
     class Handler(BaseHTTPRequestHandler):
         timeout = 10  # per socket operation
 
@@ -70,7 +72,13 @@ def make_handler(applier, token, apply_error="Load balancer node apply failed; r
             if self.path != "/v1/state":
                 self.response(404, {"error": "not found"})
                 return
-            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + token).encode()):
+            try:
+                expected = token() if callable(token) else token
+            except (OSError, ValueError):
+                LOG.exception("cannot read the API token; rejecting request")
+                self.response(503, {"error": "token unavailable"})
+                return
+            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + expected).encode()):
                 self.response(401, {"error": "unauthorized"})
                 return
             try:

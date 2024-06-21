@@ -53,7 +53,7 @@ may outlive listener removal; that is separate from the rule continuing to accep
 ## Changing pools or addresses
 
 Arrange provider routing for new addresses first. Update the load balancer node's independent `--ip`
-configuration and cleanup command, then restart it and update controller pools. zlb assigns
+configuration and cleanup command, then restart it (see below) and update controller pools. zlb assigns
 all configured addresses on its public interface. Existing administrator addresses retain
 their prefix and are never removed by zlb.
 
@@ -61,8 +61,10 @@ To shrink a pool, remove the address from controller pools first and wait for an
 snapshot without its listeners, then remove the load balancer node `--ip` entry and restart. Only
 journal-owned addresses are retired. Inspect the journal before changing prefixes, interface,
 state directory or table; cleanup with the original settings is required for ownership changes.
-A managed restart has a short reconciliation gap. Changing reservations can change published
-ports; verify the resulting traffic from an external client.
+To restart the daemon without removing forwarding, create the keep marker first:
+`sudo touch /run/zlb/zlb.keep && sudo systemctl restart zlb-natd.service`. Without it, the
+stop half of a restart runs cleanup. Changing reservations can change published ports;
+verify the resulting traffic from an external client.
 
 The controller reloads valid mounted pool JSON each tick. An invalid file preserves the
 last acknowledged load balancer node state. Use a ConfigMap directory mount rather than a subPath mount
@@ -70,10 +72,11 @@ when relying on propagation of file changes.
 
 ## Tokens and transport
 
-Natd reads its token at startup. The controller reads its mounted token file for each push.
-Coordinate load balancer node token replacement/restart with Kubernetes Secret updates, allowing for
-Secret-volume propagation. There is no overlapping-token grace period or hot token reload
-in natd. Prefer your existing secret-management process; do not print tokens in logs or
+Both sides re-read their token file for every request, so rotation needs no restart.
+Update the Kubernetes Secret and `/etc/zlb/token` together; with SSH bootstrap, the next
+bootstrap run (Helm upgrade or `bootstrap.schedule`) writes the new token in place without
+restarting the daemon. Requests fail with 401 between the two updates, because there is no
+overlapping-token grace period, and the controller retries. Prefer your existing secret-management process; do not print tokens in logs or
 store them in manifests.
 
 Serve the API over HTTPS with `--tls-cert`/`--tls-key`, optionally requiring client
@@ -83,7 +86,8 @@ their own TLS and authentication; zlb is an L4 forwarding component.
 
 ## Stop and uninstall
 
-The supplied unit's ExecStopPost removes only the owned table and owned interface addresses:
+A deliberate stop runs the unit's ExecStopPost, which removes only the owned table and owned
+interface addresses. After a crash it leaves them in place for the restart:
 
 ```sh
 sudo systemctl stop zlb-natd.service
