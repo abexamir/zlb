@@ -19,18 +19,22 @@ class FakeWatchKube:
         self.lists, self.watches = list(lists), list(watches)
         self.watched_from = []
 
-    def list_versioned(self, path):
+    def list_versioned(self, path, transform=None):
         result = self.lists.pop(0)
+        if callable(result):
+            result = result()
         if isinstance(result, Exception):
             raise result
-        return result
+        items, version = result
+        return [transform(x) for x in items] if transform else items, version
 
     def watch(self, path, version, timeout):
+        # Like Kubernetes.watch: opening (and rejection) happens before iteration.
         self.watched_from.append(version)
         events = self.watches.pop(0) if self.watches else []
         if isinstance(events, Exception):
             raise events
-        yield from events
+        return iter(events)
 
 
 def ident(item):
@@ -85,6 +89,49 @@ class ReflectorTests(unittest.TestCase):
             reflector.snapshot()
         reflector.stop()
 
+    def test_not_synced_until_a_watch_is_open(self):
+        kube = FakeWatchKube([([obj("a", 1)], "1")], [RuntimeError("403 Forbidden: watch")])
+        reflector = Reflector(kube, "/x", ident)
+        reflector.relist()
+        self.assertFalse(reflector.synced.is_set())            # listed, but no watch yet
+        with self.assertRaises(RuntimeError):
+            reflector.follow("1", 1)                           # the watch is rejected
+        self.assertFalse(reflector.synced.is_set())
+        with self.assertRaisesRegex(RuntimeError, "not synced"):
+            reflector.snapshot()
+
+    def test_blocked_relist_after_expiry_never_serves_the_stale_cache(self):
+        gate, entered = threading.Event(), threading.Event()
+        def blocked_list():
+            entered.set()
+            gate.wait(5)
+            return [obj("fresh", 9)], "9"
+        kube = FakeWatchKube([([obj("stale", 1)], "1"), blocked_list],
+                             [[{"type": "ERROR", "object": {"code": 410, "message": "too old"}}], []])
+        reflector = Reflector(kube, "/x", ident, resync=60)
+        thread = threading.Thread(target=reflector.run, daemon=True)
+        with self.assertLogs("zlb.cache", level="INFO"):
+            thread.start()
+            self.assertTrue(entered.wait(5))
+            # Continuity was lost and the replacement list is still in flight.
+            self.assertFalse(reflector.synced.is_set())
+            with self.assertRaisesRegex(RuntimeError, "not synced"):
+                reflector.snapshot()
+            gate.set()
+            self.assertTrue(reflector.synced.wait(5))
+        reflector.stop()
+        self.assertEqual([x["metadata"]["uid"] for x in reflector.snapshot()], ["fresh"])
+
+    def test_failed_later_page_publishes_nothing(self):
+        kube = FakeWatchKube([([obj("old", 1)], "1"), RuntimeError("page 2 failed")], [[]])
+        reflector = Reflector(kube, "/x", ident)
+        reflector.follow(reflector.relist(), 1)
+        self.assertTrue(reflector.synced.is_set())
+        with self.assertRaises(RuntimeError):
+            reflector.relist()
+        self.assertFalse(reflector.synced.is_set())
+        self.assertEqual(list(reflector.items), ["old"])      # untouched, and not served
+
     def test_expired_watch_relists(self):
         kube = FakeWatchKube([([obj("a", 1)], "1"), ([obj("b", 9)], "9")],
                              [[{"type": "ERROR", "object": {"code": 410, "message": "too old"}}], []])
@@ -125,6 +172,19 @@ class ReflectorTests(unittest.TestCase):
         self.assertEqual(s["metadata"]["labels"], {"kubernetes.io/service-name": "web"})
         self.assertEqual(s["endpoints"], [])
         self.assertEqual(s["ports"], [{"name": "http", "protocol": "TCP", "port": 8080}])
+
+
+class ListTests(unittest.TestCase):
+    def test_each_page_is_trimmed_before_the_next_is_fetched(self):
+        from zlb.kube import Kubernetes
+        log = []
+        pages = iter([{"items": [obj("a", 1)], "metadata": {"continue": "c1", "resourceVersion": "7"}},
+                      {"items": [obj("b", 2)], "metadata": {"resourceVersion": "7"}}])
+        kube = Kubernetes.__new__(Kubernetes)
+        kube.request = lambda method, path: (log.append("read page"), next(pages))[1]
+        items, version = kube.list_versioned("/x", lambda item: (log.append("trim " + item["metadata"]["uid"]), {"uid": item["metadata"]["uid"]})[1])
+        self.assertEqual(log, ["read page", "trim a", "read page", "trim b"])
+        self.assertEqual((items, version), ([{"uid": "a"}, {"uid": "b"}], "7"))
 
 
 class EquivalenceTests(unittest.TestCase):

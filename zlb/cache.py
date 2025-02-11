@@ -111,6 +111,7 @@ class Reflector:
                 while time.monotonic() < deadline and not self.stopped.is_set():
                     version = self.follow(version, min(self.watch_timeout, max(1, deadline - time.monotonic())))
             except Expired:
+                self.synced.clear()
                 LOG.info("watch of %s expired; relisting", self.path)
             except Exception:
                 self.synced.clear()
@@ -119,14 +120,20 @@ class Reflector:
                 delay = min(delay * 2, 30)
 
     def relist(self):
-        items, version = self.kube.list_versioned(self.path)
+        """Replace the cache from a complete list. The cache counts as synced again only once
+        a watch from the list's resourceVersion is open (see follow)."""
+        self.synced.clear()
+        items, version = self.kube.list_versioned(self.path, self.transform)
+        replacement = {item["metadata"]["uid"]: item for item in items}
         with self.lock:
-            self.items = {item["metadata"]["uid"]: self.transform(item) for item in items}
-        self.synced.set()
+            self.items = replacement
         return version
 
     def follow(self, version, timeout):
-        for event in self.kube.watch(self.path, version, timeout):
+        events = self.kube.watch(self.path, version, timeout)
+        # The list (or the previous stream) and this open stream together cover every change.
+        self.synced.set()
+        for event in events:
             kind, obj = event.get("type"), event.get("object", {})
             if kind == "ERROR":
                 if obj.get("code") == 410:

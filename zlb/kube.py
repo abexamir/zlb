@@ -31,30 +31,39 @@ class Kubernetes:
     def list_all(self, path, **params):
         return self.list_versioned(path, **params)[0]
 
-    def list_versioned(self, path, **params):
-        """All pages of a list and the resourceVersion the list is consistent at."""
+    def list_versioned(self, path, transform=None, **params):
+        """All pages of a list and the resourceVersion the list is consistent at. `transform`
+        is applied to each page before the next is fetched, so at most one page of full
+        objects is held at a time."""
         items, continuation, version = [], None, None
         while True:
             query = {"limit": 500, **params}
             if continuation:
                 query["continue"] = continuation
             result = self.request("GET", path + "?" + urlencode(query))
-            items.extend(result["items"])
+            page = result.pop("items")
+            items.extend(map(transform, page) if transform else page)
+            del page
             version = version or result.get("metadata", {}).get("resourceVersion")
             continuation = result.get("metadata", {}).get("continue")
             if not continuation:
                 return items, version
 
     def watch(self, path, version, timeout=240):
-        """Yield watch events from `version` until the server ends the stream."""
+        """Open a watch from `version` and return an iterator over its events. Opening happens
+        here, so a rejected watch raises before the caller treats the stream as live."""
         query = urlencode({"watch": "1", "resourceVersion": version, "allowWatchBookmarks": "true",
                            "timeoutSeconds": int(timeout)})
         # The read timeout outlives the server's own so an idle but healthy stream is not cut
         # short, yet a silently dead connection is still noticed.
-        with self.open("GET", path + "?" + query, timeout=timeout + 60) as response:
-            for line in response:
-                if line.strip():
-                    yield json.loads(line)
+        response = self.open("GET", path + "?" + query, timeout=timeout + 60)
+
+        def events():
+            with response:
+                for line in response:
+                    if line.strip():
+                        yield json.loads(line)
+        return events()
 
     def patch(self, svc, field, value, status=False):
         meta = svc["metadata"]
