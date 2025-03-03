@@ -44,8 +44,11 @@ def node_addresses(nodes, node_cidr):
     return result
 
 
-def compile_state(services, nodes, slices, pool, node_cidr):
-    """Resolve public listeners from administrator policy and a complete API snapshot."""
+def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
+    """Resolve public listeners from administrator policy and a complete API snapshot.
+
+    `constraints`, as reported by the load balancer node's /v1/info, are applied per Service
+    so that a Service the daemon would refuse fails alone instead of failing the snapshot."""
     config = pool if isinstance(pool, PoolConfig) else PoolConfig.simple(pool)
     addresses = node_addresses(nodes, node_cidr)
     local_nodes = {}
@@ -63,7 +66,10 @@ def compile_state(services, nodes, slices, pool, node_cidr):
                     if entry.get("port") is not None:
                         port_key = ((entry.get("name") or ""), entry.get("protocol", "TCP"))
                         local_nodes.setdefault((*key, *port_key), set()).add(endpoint["nodeName"])
-    assignments, errors, listeners = {}, {}, []
+    assignments, errors, listeners, claims = {}, {}, [], []
+    node_ips = set(constraints["ips"]) if constraints else None
+    forbidden = set(constraints.get("forbidden_ports", ())) if constraints else set()
+    backend_ports = constraints.get("backend_ports") if constraints else None
     for svc in services:
         if not active(svc):
             continue
@@ -89,16 +95,27 @@ def compile_state(services, nodes, slices, pool, node_cidr):
             ranges = [str(ipaddress.IPv4Network(r, strict=False))
                       for r in spec.get("loadBalancerSourceRanges", [])]
             selected, choices = config.candidates(svc, identity)
+            if node_ips is not None:
+                choices = [i for i in choices if i in node_ips]
+                if not choices:
+                    raise ValueError("the load balancer node does not allow this Service's IP; "
+                                     "add it to the daemon's --ip list")
             old_ips = [x.get("ip") for x in svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])]
             ip = next((i for i in old_ips if i in choices), choices[0])
-            resolved = []
+            resolved, literal = [], False
             for p in ports:
                 owner = selected.reserved_to(ip, p["port"])
                 public_port = p["port"] if owner == identity else p["nodePort"]
+                literal = literal or owner == identity
                 if contains(config.blocked_ports, public_port):
                     raise ValueError(f"port {public_port} is globally blocked")
+                if public_port in forbidden:
+                    raise ValueError(f"port {public_port} is reserved on the load balancer node")
+                if backend_ports and not backend_ports[0] <= p["nodePort"] <= backend_ports[1]:
+                    raise ValueError(f"nodePort {p['nodePort']} is outside the load balancer node's "
+                                     f"backend range {backend_ports[0]}-{backend_ports[1]}")
                 resolved.append(public_port)
-            assignments[uid] = ip
+            own = []
             for p, public_port in zip(ports, resolved):
                 protocol = p.get("protocol", "TCP")
                 backends = addresses
@@ -106,9 +123,24 @@ def compile_state(services, nodes, slices, pool, node_cidr):
                     key = (meta["namespace"], meta["name"], p.get("name", ""), protocol)
                     names = local_nodes.get(key, set())
                     backends = {n: addresses[n] for n in names}
-                listeners.append(dict(ip=ip, port=public_port, protocol=protocol, source_ranges=ranges,
-                                      backend_port=p["nodePort"], backend_set=tuple(sorted(backends.values()))))
+                own.append(dict(ip=ip, port=public_port, protocol=protocol, source_ranges=ranges,
+                                 backend_port=p["nodePort"], backend_set=tuple(sorted(backends.values()))))
+            # Reservation owners claim first, then older Services, then by name.
+            claims.append(((0 if literal else 1, meta.get("creationTimestamp", ""), identity), uid, ip, own))
         except (ValueError, TypeError, KeyError) as exc:
             errors[uid] = str(exc)
+    # Two Services can resolve to the same public (IP, protocol, port), e.g. a literal
+    # reservation equal to another Service's NodePort. The lower-ranked Service fails alone.
+    taken = {}
+    for (_, _, identity), uid, ip, own in sorted(claims, key=lambda claim: claim[0]):
+        keys = [(x["ip"], x["protocol"], x["port"]) for x in own]
+        clash = next((key for key in keys if key in taken), None)
+        if clash:
+            errors[uid] = (f"public listener {clash[0]}:{clash[2]}/{clash[1]} is already used by "
+                           f"{taken[clash]}")
+            continue
+        taken.update(dict.fromkeys(keys, identity))
+        assignments[uid] = ip
+        listeners.extend(own)
     return Plan(validate_state(compact(listeners), config.ips, node_cidr),
                 assignments, errors)

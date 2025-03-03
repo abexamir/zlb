@@ -127,6 +127,7 @@ class PoolTests(unittest.TestCase):
             path = Path(directory) / "pools.json"
             path.write_text('{"pools":')
             kube, lb_node = FakeKube([service()]), Mock()
+            lb_node.info.return_value = None
             controller = Controller(kube, lb_node, None, CIDR, path)
             with self.assertRaises(ValueError):
                 controller.reconcile()
@@ -142,6 +143,7 @@ class PoolTests(unittest.TestCase):
             raw = {"default_pool": "public", "pools": [{"name": "public", "ips": POOL}]}
             path.write_text(json.dumps(raw))
             kube, lb_node = FakeKube([service("app", 443, node_port=31007)]), Mock()
+            lb_node.info.return_value = None
             controller = Controller(kube, lb_node, None, CIDR, path)
             controller.reconcile()
             self.assertEqual(lb_node.apply.call_args.args[0]["listeners"][0]["port"], 31007)
