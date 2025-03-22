@@ -20,7 +20,7 @@ LOG = logging.getLogger(__name__)
 
 # This runs as root on the explicitly configured VM. Input is carried only on SSH stdin.
 REMOTE = r'''
-import fcntl,grp,hashlib,json,os,pathlib,pwd,shutil,subprocess
+import fcntl,grp,hashlib,json,os,pathlib,pwd,shlex,shutil,subprocess,time
 p=json.load(__import__('sys').stdin)
 def run(*args): subprocess.run(args,check=True,stdout=subprocess.DEVNULL,timeout=600)
 with open('/run/zlb-bootstrap.lock','w') as lock:
@@ -101,10 +101,18 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
     run('systemctl','restart','zlb-natd.service')
    else: run('systemctl','start','zlb-natd.service')
   finally: keep.unlink(missing_ok=True)
+  # systemctl returns once the process is spawned; a daemon that fails while starting up is
+  # only visible a moment later.
+  for _ in range(3):
+   time.sleep(1)
+   run('systemctl','is-active','--quiet','zlb-natd.service')
  saved_package={x.name:x.read_bytes() for x in target.glob('*.py')} if target.exists() else None
  saved={path:path.read_bytes() if path.exists() else None for path in modes}
+ swapped=False
  try:
-  if restart: install_package({name:data.encode() for name,data in p['files'].items()})
+  if restart:
+   install_package({name:data.encode() for name,data in p['files'].items()})
+   swapped=True
   for path,(data,mode) in config.items(): write(path,data.encode(),mode)
   for path in stale: path.unlink(missing_ok=True)
   write(unit,p['unit'].encode(),0o644)
@@ -116,17 +124,30 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
   run('systemctl','is-active','--quiet','zlb-natd.service')
   write(marker,(revision+'\n').encode(),0o600)
  except Exception:
-  # Put the previous package, unit and files back. Report rollback problems without
-  # hiding the original failure.
+  # Stop the candidate while its own code is still installed, so its cleanup decides what
+  # happens to forwarding: an existing deployment keeps it (keep marker); a failed first
+  # install removes whatever state the candidate created. Only then put the previous
+  # package, unit and files back and start the previous daemon. Rollback problems are
+  # reported without hiding the original failure.
   try:
+   if swapped and running:
+    if keep.parent.is_dir(): keep.write_text('rollback\n')
+    subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL,timeout=600)
+    keep.unlink(missing_ok=True)
+   elif swapped:
+    subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL,timeout=600)
+    cleanup=next(line.split('=',1)[1] for line in p['unit'].splitlines() if line.startswith('ExecStopPost='))
+    environment={k:v for k,v in os.environ.items() if k!='SERVICE_RESULT'}
+    subprocess.run(shlex.split(cleanup),cwd=str(target.parent),env=environment,
+                   stdout=subprocess.DEVNULL,timeout=600)
    if saved_package is not None: install_package(saved_package)
    elif target.exists(): shutil.rmtree(target)
    for path,data in saved.items():
     if data is None: path.unlink(missing_ok=True)
     else: write(path,data,modes[path])
    run('systemctl','daemon-reload')
-   if running: start(True)
-   else: subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL)
+   if running and subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode:
+    run('systemctl','start','zlb-natd.service')
   except Exception as rollback:
    print('rollback failed: '+repr(rollback),file=__import__('sys').stderr)
   raise

@@ -48,6 +48,11 @@ Privilege is needed for disposable Linux network namespaces, veth links, a bridg
 nftables rules. The test has no host mounts or external network, and Docker's bridge is not
 part of the traffic path. It verifies real packet behavior, not just generated text.
 
+The same container then runs `tests/verify_bootstrap.py`: the real SSH-bootstrap remote script
+against a real daemon, with a minimal `systemctl` stand-in that honors the unit's ExecStart,
+ExecStopPost and RuntimeDirectory. It covers first install, token rotation, upgrade, and
+rollback of rejected candidates without losing forwarding.
+
 The suite requires kernel SCTP support and fails explicitly if unavailable. It verifies TCP,
 UDP and SCTP packet paths, source preservation, ACLs, empty-backend guards, connection survival,
 interface assignment/cleanup, rollback and preservation of an unrelated table.
