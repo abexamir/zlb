@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 from zlb.cache import Reflector, endpoint_slice, node, service
 from zlb.controller import Controller, same_ingress
-from zlb.model import FINALIZER
+from zlb.model import FINALIZER, PUBLISHED
 
 
 def obj(uid, version, **extra):
@@ -231,11 +231,14 @@ class StatusTests(unittest.TestCase):
                "spec": {"type": "LoadBalancer", "ports": [{"port": 80, "nodePort": 30080}]}}
         cache.snapshot.return_value = ([svc], [], [])
         kube.patch.side_effect = lambda svc, field, value, status=False: dict(svc, metadata=dict(svc["metadata"], finalizers=[FINALIZER]))
+        kube.annotate.side_effect = lambda svc, key, value: dict(svc, metadata=dict(svc["metadata"], annotations={key: value}))
         lb_node = Mock()
         lb_node.info.return_value = None
         Controller(kube, lb_node, ["198.51.100.10"], "10.0.0.0/24", cache=cache).reconcile()
         kube.list_all.assert_not_called()
         self.assertTrue(cache.observe_service.called)
+        self.assertEqual(cache.observe_service.call_args.args[0]["metadata"]["annotations"],
+                         {PUBLISHED: "80:30080/TCP"})
 
 
 if __name__ == "__main__":

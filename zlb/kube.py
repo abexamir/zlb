@@ -73,6 +73,14 @@ class Kubernetes:
                       {"op": "add", "path": field, "value": value}]
         return self.request("PATCH", path, operations, "application/json-patch+json")
 
+    def annotate(self, svc, key, value):
+        """Set (or with None, remove) one annotation. A merge patch touches only that key, and
+        the resourceVersion it carries makes the write conditional like the JSON patches."""
+        meta = svc["metadata"]
+        path = f"/api/v1/namespaces/{quote(meta['namespace'], safe='')}/services/{quote(meta['name'], safe='')}"
+        body = {"metadata": {"resourceVersion": meta["resourceVersion"], "annotations": {key: value}}}
+        return self.request("PATCH", path, body, "application/merge-patch+json")
+
     def warning(self, svc, message):
         from datetime import datetime, timezone
         meta = svc["metadata"]

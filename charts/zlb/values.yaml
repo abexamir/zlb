@@ -70,6 +70,10 @@ bootstrap:
   # Drop traffic to the public IPs that is not a listener, a reply or ping, hiding
   # VM-local services such as sshd. Keep false if you administer the VM via a public IP.
   isolatePublicIPs: false
+  # Optional source CIDRs (usually the node CIDR) whose connections to the public IPs are
+  # masqueraded as the VM, so Pods and nodes can reach LoadBalancer IPs from inside the
+  # cluster. Those connections lose their client address; other clients keep theirs.
+  hairpinSnatFrom: []
   # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
   # bootstrap only on Helm install and upgrade.
   schedule: ""

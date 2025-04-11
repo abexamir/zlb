@@ -1,6 +1,6 @@
 """Pure, deterministic Service + Node + EndpointSlice -> load balancer node state compiler."""
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .model import CLASS, PREFIX, PROTOCOLS, compact, port, validate_state
 from .pools import PoolConfig, contains
@@ -11,6 +11,7 @@ class Plan:
     state: dict
     assignments: dict  # UID -> IP; only successful Services
     errors: dict       # UID -> visible warning
+    published: dict = field(default_factory=dict)  # UID -> "port:published/PROTOCOL,..."
 
 
 def owned(service):
@@ -36,9 +37,9 @@ def node_addresses(nodes, node_cidr):
         if not any(c["type"] == "Ready" and c["status"] == "True"
                    for c in node.get("status", {}).get("conditions", [])):
             continue
-        addresses = sorted(a["address"] for a in node.get("status", {}).get("addresses", [])
-                           if a["type"] == "InternalIP"
-                           and ipaddress.ip_address(a["address"]) in network)
+        addresses = sorted((a["address"] for a in node.get("status", {}).get("addresses", [])
+                            if a["type"] == "InternalIP"
+                            and ipaddress.ip_address(a["address"]) in network), key=ipaddress.IPv4Address)
         if addresses:
             result[metadata["name"]] = addresses[0]
     return result
@@ -126,13 +127,15 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
                 own.append(dict(ip=ip, port=public_port, protocol=protocol, source_ranges=ranges,
                                  backend_port=p["nodePort"], backend_set=tuple(sorted(backends.values()))))
             # Reservation owners claim first, then older Services, then by name.
-            claims.append(((0 if literal else 1, meta.get("creationTimestamp", ""), identity), uid, ip, own))
+            claims.append(((0 if literal else 1, meta.get("creationTimestamp", ""), identity), uid, ip, own,
+                           [p["port"] for p in ports]))
         except (ValueError, TypeError, KeyError) as exc:
             errors[uid] = str(exc)
     # Two Services can resolve to the same public (IP, protocol, port), e.g. a literal
     # reservation equal to another Service's NodePort. The lower-ranked Service fails alone.
     taken = {}
-    for (_, _, identity), uid, ip, own in sorted(claims, key=lambda claim: claim[0]):
+    published = {}
+    for (_, _, identity), uid, ip, own, service_ports in sorted(claims, key=lambda claim: claim[0]):
         keys = [(x["ip"], x["protocol"], x["port"]) for x in own]
         clash = next((key for key in keys if key in taken), None)
         if clash:
@@ -142,5 +145,8 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
         taken.update(dict.fromkeys(keys, identity))
         assignments[uid] = ip
         listeners.extend(own)
+        # Unreserved ports are published on their NodePort, not the Service port, so record
+        # the mapping on the Service in the style of kubectl's PORT(S) column.
+        published[uid] = ",".join(f"{number}:{x['port']}/{x['protocol']}" for number, x in zip(service_ports, own))
     return Plan(validate_state(compact(listeners), config.ips, node_cidr),
-                assignments, errors)
+                assignments, errors, published)

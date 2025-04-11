@@ -35,7 +35,7 @@ NodePorts; administrator reservations publish literal Service ports or dedicate 
 Unclassified LoadBalancer Services are adopted. Listener identity includes protocol.
 The load balancer node assigns configured IPs to an explicit public interface. Its persistent address
 journal owns only addresses it added; preexisting and primary addresses must survive cleanup.
-It does not SNAT clients or manage the whole firewall. Return routing, CNI protocol support
+It does not SNAT external clients (in-cluster hairpin SNAT is opt-in) or manage the whole firewall. Return routing, CNI protocol support
 and application NetworkPolicies remain operator responsibilities.
 
 Keep the compiler pure, validate the wire format before rule generation, preserve independent

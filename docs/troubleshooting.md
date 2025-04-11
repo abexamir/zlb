@@ -54,9 +54,9 @@ Confirm return routing traverses the load balancer node. Inspect `externalTraffi
 perform node-side SNAT, while Local is the intended choice for original-address visibility.
 Use a client and Kubernetes service datapath compatible with the selected protocol.
 
-Same-subnet clients and load balancer node-originated tests need special care. Replies can bypass the
-load balancer node for hairpin traffic; locally generated load balancer node traffic does not hit PREROUTING.
-Test from a client on the actual supported external path.
+Pods and nodes calling a public IP fail unless `--hairpin-snat-from` covers their source
+address; see [in-cluster clients](installation.md#in-cluster-clients-hairpin). Locally generated
+load balancer node traffic does not hit PREROUTING, so test from another host.
 
 ## Rule apply fails
 

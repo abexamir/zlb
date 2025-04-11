@@ -89,6 +89,9 @@ spec:
         {{- if .Values.bootstrap.isolatePublicIPs }}
         - --isolate-public-ips
         {{- end }}
+        {{- range .Values.bootstrap.hairpinSnatFrom }}
+        - {{ printf "--hairpin-snat-from=%s" . | quote }}
+        {{- end }}
       resources:
         {{- toYaml .Values.bootstrap.resources | nindent 8 }}
       securityContext:

@@ -941,8 +941,9 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
   established flows can survive a tightened allowlist; no conntrack purge is performed.
 - NetworkPolicy and host/CNI firewalls remain independent. A publicly assigned address can
   still be blocked by a Pod policy that allows only cluster sources.
-- Same-subnet hairpin, direct NodePort access from the egress router itself, and LB-originated
-  requests to its own VIP need separate routing/NAT analysis. zlb has no OUTPUT NAT path.
+- In-cluster clients need the opt-in `--hairpin-snat-from`. Direct NodePort access from the
+  egress router itself and LB-originated requests to its own VIP need separate routing/NAT
+  analysis. zlb has no OUTPUT NAT path.
 
 ### Partial failure and ownership
 

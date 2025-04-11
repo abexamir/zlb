@@ -1,8 +1,9 @@
 {{- if and .Values.rbac.restrictServiceWrites (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") }}
 # RBAC cannot scope "patch services" to fields. This policy confines the controller's
-# Service writes to adding or removing its own cleanup finalizer, so a compromised controller
-# cannot redirect traffic by rewriting selectors, ports or other metadata. Status writes use
-# the services/status subresource, which cannot change spec or metadata.
+# Service writes to adding or removing its own cleanup finalizer and recording its own
+# zlb.zarrino.tech/published-ports annotation, so a compromised controller cannot redirect
+# traffic by rewriting selectors, ports or other metadata. Status writes use the
+# services/status subresource, which cannot change spec or metadata.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -25,17 +26,22 @@ spec:
       expression: "has(object.metadata.finalizers) ? object.metadata.finalizers.filter(f, f != 'zlb.zarrino.tech/cleanup') : []"
     - name: oldOthers
       expression: "has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers.filter(f, f != 'zlb.zarrino.tech/cleanup') : []"
+    - name: annotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations.filter(k, k != 'zlb.zarrino.tech/published-ports') : []"
+    - name: oldAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations.filter(k, k != 'zlb.zarrino.tech/published-ports') : []"
   validations:
     - expression: "object.spec == oldObject.spec"
       message: zlb controller may not change a Service spec
     - expression: >-
         has(object.metadata.labels) == has(oldObject.metadata.labels) &&
         (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
-        has(object.metadata.annotations) == has(oldObject.metadata.annotations) &&
-        (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+        size(variables.annotations) == size(variables.oldAnnotations) &&
+        variables.annotations.all(k, k in oldObject.metadata.annotations &&
+          oldObject.metadata.annotations[k] == object.metadata.annotations[k]) &&
         has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) &&
         (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
-      message: zlb controller may not change Service labels, annotations or owners
+      message: zlb controller may not change Service labels, owners or annotations other than zlb.zarrino.tech/published-ports
     - expression: "variables.others == variables.oldOthers"
       message: zlb controller may only add or remove the zlb.zarrino.tech/cleanup finalizer
 ---
