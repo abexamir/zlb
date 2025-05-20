@@ -12,3 +12,5 @@ dist/
 *.key
 kubeconfig*
 values.local.yaml
+.coverage
+.coverage.*
