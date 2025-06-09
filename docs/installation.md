@@ -205,8 +205,9 @@ node's address on the node network:
 python3 -m zlb.natd ... --hairpin-snat-from 10.0.0.0/24
 ```
 
-Only zlb-DNATed connections from those sources are masqueraded, so external clients keep
-their address. The workload sees the load balancer node instead of the in-cluster client,
+Only connections from those sources to a zlb listener's (IP, protocol, port) are
+masqueraded, so external clients keep their address and DNAT you configured yourself on the
+same IPs is untouched. The workload sees the load balancer node instead of the in-cluster client,
 and `loadBalancerSourceRanges` still applies to the original source.
 
 TCP, UDP and SCTP may share numeric ports. The load balancer node kernel needs conntrack/NAT support for

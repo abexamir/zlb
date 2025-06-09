@@ -56,13 +56,14 @@ def listener_id(listener):
     return digest([listener["ip"], listener["protocol"].lower(), listener["port"]])[:16]
 
 
-def hairpin_rule(sources, ips, node_cidr):
+def hairpin_rule(sources, node_cidr):
     """Masquerade listener connections from `sources` (cluster nodes or Pods reaching a public
     IP) as the load balancer node, so the backend node replies through it rather than straight
     to the client, which would drop a reply that does not come from the public IP it called.
-    Only zlb-DNATed flows to the node CIDR match; every other client keeps its source address."""
+    Only DNATed flows whose original (IP, protocol, port) is a zlb listener in @hairpin match:
+    other clients keep their source address, and DNAT the operator configured is untouched."""
     return (f"ip saddr {{ {', '.join(sources)} }} ip daddr {node_cidr} ct status dnat "
-            f"ct original ip daddr {{ {', '.join(ips)} }} counter masquerade")
+            "ct original ip daddr . ct original protocol . ct original proto-dst @hairpin counter masquerade")
 
 
 def layout(state, ips, public_interface=None, isolate=False, hairpin=()):
@@ -85,6 +86,8 @@ def layout(state, ips, public_interface=None, isolate=False, hairpin=()):
             if listener["source_ranges"]:
                 chains["a_" + listener_id(listener)] = 2
     maps = {"dispatch": sum(bool(x["backends"]) for x in listeners), "guard": len(listeners)}
+    if hairpin and ips:
+        maps["hairpin"] = maps["dispatch"]  # a set of the listener tuples DNATed by zlb
     return chains, maps, counters
 
 
@@ -137,6 +140,9 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
                     f"ct reply ip saddr {node_cidr} counter accept"] if ips else [])
     return (f'table ip {table} {{\ncomment "{marker(state)}";\n'
             + verdict_map("dispatch", dispatch) + verdict_map("guard", guard)
+            + (f"set hairpin {{\n    type {KEY}\n"
+               + (f"    elements = {{ {', '.join(x.split(' : ')[0] for x in dispatch)} }}\n" if dispatch else "")
+               + "}\n" if hairpin and ips else "")
             + "".join(item + "\n" for item in objects)
             # A DNATed listener flow must target the node CIDR; anything else for a listener
             # tuple (denied source, empty backends) is dropped before a local socket sees it.
@@ -147,7 +153,7 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
                     established + forward_guard + [original])
             + chain("input", "type filter hook input priority -10; policy accept;", [original] + input_guard)
             + (chain("postrouting", "type nat hook postrouting priority 100; policy accept;",
-                     [hairpin_rule(hairpin, ips, node_cidr)]) if hairpin and ips else "")
+                     [hairpin_rule(hairpin, node_cidr)]) if hairpin and ips else "")
             + "}\n")
 
 
@@ -234,8 +240,9 @@ class Applier:
                 chains[item["chain"]["name"]] = item["chain"]
             elif "rule" in item:
                 rules[item["rule"]["chain"]] = rules.get(item["rule"]["chain"], 0) + 1
-            elif "map" in item:
-                maps[item["map"]["name"]] = len(item["map"].get("elem", []))
+            elif "map" in item or "set" in item:
+                kind = "map" if "map" in item else "set"
+                maps[item[kind]["name"]] = len(item[kind].get("elem", []))
             elif "counter" in item:
                 counters.add(item["counter"]["name"])
         expected_chains, expected_maps, expected_counters = layout(
