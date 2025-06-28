@@ -122,6 +122,26 @@ class ReflectorTests(unittest.TestCase):
         reflector.stop()
         self.assertEqual([x["metadata"]["uid"] for x in reflector.snapshot()], ["fresh"])
 
+    def test_planned_resync_keeps_serving(self):
+        gate, entered = threading.Event(), threading.Event()
+        def blocked_list():
+            entered.set()
+            gate.wait(5)
+            return [obj("b", 9)], "9"
+        kube = FakeWatchKube([([obj("a", 1)], "1"), blocked_list] + [([obj("b", 9)], "9")] * 100, [])
+        reflector = Reflector(kube, "/x", ident, resync=0.2, watch_timeout=0.1)
+        reflector.start()
+        self.assertTrue(entered.wait(5))
+        # The watch ended at the resync deadline, not on an error: the cache is still whole.
+        self.assertTrue(reflector.synced.is_set())
+        self.assertEqual([x["metadata"]["uid"] for x in reflector.snapshot()], ["a"])
+        gate.set()
+        deadline = time.monotonic() + 5
+        while [x["metadata"]["uid"] for x in reflector.snapshot()] != ["b"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        reflector.stop()
+        self.assertEqual([x["metadata"]["uid"] for x in reflector.snapshot()], ["b"])
+
     def test_failed_later_page_publishes_nothing(self):
         kube = FakeWatchKube([([obj("old", 1)], "1"), RuntimeError("page 2 failed")], [[]])
         reflector = Reflector(kube, "/x", ident)

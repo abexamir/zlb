@@ -313,6 +313,10 @@ def main(argv=None):
     endpoint = urlparse(args.lb_node)
     if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
         parser.error("--lb-node must be an http:// or https:// URL")
+    if endpoint.port is None:
+        # The daemon listens on this port, and the controller connects to it. Without one
+        # the controller would use 80 or 443 while the daemon defaulted to 9808.
+        parser.error("--lb-node must include the daemon's port, e.g. https://10.0.0.3:9808")
     tls_files = {name: path for name, path in (("tls.crt", args.tls_cert_file), ("tls.key", args.tls_key_file),
                                                ("client-ca.crt", args.tls_client_ca_file)) if path}
     if endpoint.scheme == "https" and not {"tls.crt", "tls.key"} <= set(tls_files):
@@ -322,7 +326,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO)
     try:
         SSHBootstrap(args.ssh_host or endpoint.hostname, args.ssh_user, args.key_file,
-                     args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port or 9808,
+                     args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port,
                      args.ip, args.public_interface, args.node_cidr, args.ssh_port,
                      args.backend_port_range, tls_files, args.allow_from,
                      args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from).ensure()

@@ -70,6 +70,9 @@ spec:
         {{- end }}
         - {{ printf "--node-cidr=%s" (required "nodeCIDR is required" .Values.nodeCIDR) | quote }}
         - {{ printf "--backend-port-range=%s" .Values.bootstrap.backendPortRange | quote }}
+        {{- if not (regexMatch "^https?://[0-9.]+:[0-9]+/?$" .Values.lbNode.url) }}
+        {{- fail "with bootstrap, lbNode.url must be http(s)://IPv4:PORT; the daemon listens on that address and port" }}
+        {{- end }}
         {{- if hasPrefix "https://" .Values.lbNode.url }}
         {{- if not .Values.bootstrap.tlsSecret }}{{ fail "an https:// lbNode.url with bootstrap requires bootstrap.tlsSecret" }}{{ end }}
         - --tls-cert-file=/var/run/zlb-tls/tls.crt

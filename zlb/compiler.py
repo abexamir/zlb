@@ -87,7 +87,10 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
                 if p.get("protocol", "TCP") not in PROTOCOLS:
                     raise ValueError("protocol must be TCP, UDP or SCTP")
                 requested = port(p["port"])
-                port(p.get("nodePort"))
+                if p.get("nodePort") is None:
+                    raise ValueError(f"port {requested} has no nodePort; zlb forwards to NodePorts, so keep "
+                                     "spec.allocateLoadBalancerNodePorts enabled")
+                port(p["nodePort"])
                 if (requested, p.get("protocol", "TCP")) in seen:
                     raise ValueError("duplicate protocol/port")
                 seen.add((requested, p.get("protocol", "TCP")))

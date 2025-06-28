@@ -11,7 +11,8 @@ import time
 from collections import Counter
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = str(Path(__file__).resolve().parents[1])
+sys.path.insert(0, ROOT)
 from zlb.natd import Applier, listener_id, render, stable
 from zlb.model import compact, digest
 
@@ -69,6 +70,11 @@ LOCAL = (PUBLIC, 8080)              # a load balancer node-local service listeni
 class NamespaceApplier(Applier):
     def command(self, *args, input=None):
         return ns("zlb-gw", *args, input=input)
+
+    def generation(self):
+        value = ns("zlb-gw", sys.executable, "-c", f"import sys; sys.path.insert(0, {ROOT!r}); "
+                   "from zlb.natd import generation; print(generation())").strip()
+        return None if value == "None" else int(value)
 
 
 def outside():
@@ -180,7 +186,20 @@ def main():
         with patch.object(a, "command", side_effect=recording):
             a.apply(copy.deepcopy(state))
         assert not any("--check" in c or "--file" in c for c in calls), calls
-        print(f"PASS: unchanged state is acknowledged without nft --check or commit ({len(calls)} read-only calls)", flush=True)
+        assert not any(c[0] == "nft" for c in calls), calls
+        print(f"PASS: unchanged state is acknowledged without listing, checking or committing nftables ({len(calls)} calls)", flush=True)
+        verified = a.snapshot()["fingerprint"]
+        ns("zlb-gw", "nft", "add", "table", "ip", "unrelated")
+        calls.clear()
+        with patch.object(a, "command", side_effect=recording):
+            a.apply(copy.deepcopy(state))
+        assert any(c[:2] == ("nft", "-j") for c in calls) and not any("--file" in c for c in calls), calls
+        ns("zlb-gw", "nft", "delete", "table", "ip", "unrelated")
+        ns("zlb-gw", "nft", "add", "rule", "ip", "zlb", "input", "counter", "accept")
+        assert a.snapshot()["fingerprint"] != verified
+        a.apply(copy.deepcopy(state))
+        assert a.snapshot()["fingerprint"] == verified
+        print("PASS: another table's change costs one listing, and drift in zlb's table is repaired on the next send", flush=True)
         rebalanced = copy.deepcopy(state)
         rebalanced["listeners"][0]["backends"] = rebalanced["listeners"][0]["backends"][:1]
         a.apply(rebalanced)

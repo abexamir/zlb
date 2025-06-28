@@ -8,6 +8,8 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 lbNode:
+  # Daemon API URL including its port, e.g. https://10.0.0.3:9808. With SSH bootstrap the
+  # host must be the VM's IPv4 address; the daemon is configured to listen on it.
   url: ""
   allowPrivateHTTP: false
   existingSecret: ""
