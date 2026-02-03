@@ -3,7 +3,7 @@ nameOverride: ""
 fullnameOverride: ""
 image:
   repository: ghcr.io/abexamir/zlb
-  tag: "0.4.0"
+  tag: "0.5.0"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -37,15 +37,17 @@ resources:
     memory: 128Mi
 rbac:
   # Install a ValidatingAdmissionPolicy (Kubernetes 1.30+) that limits the controller's
-  # Service writes to its own finalizer. Skipped automatically when the API is unavailable.
+  # Service writes to its own finalizer and zlb.zarrino.tech/published-ports annotation.
+  # Skipped automatically when the API is unavailable.
   restrictServiceWrites: true
 nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
 
-# Optional SSH provisioning of a dedicated Debian/Ubuntu VM. A pre-install/pre-upgrade hook
-# Job runs it; the controller itself never receives the SSH key.
+# Optional SSH provisioning of a dedicated Debian/Ubuntu VM. A pre-install/pre-upgrade/
+# pre-rollback hook Job (and the optional CronJob) runs it; the controller never receives the
+# SSH key. sshHost must be the VM's IPv4 address.
 bootstrap:
   enabled: false
   existingSecret: ""

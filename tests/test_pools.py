@@ -19,10 +19,9 @@ def configuration():
 
 class PoolTests(unittest.TestCase):
     def test_reserved_ports_stay_literal_everything_else_uses_nodeport(self):
-        # "apps/ingress" owns 80+443 on POOL[0] -- its own listeners stay literal. Neither
-        # other Service is reserved anything, so each publishes its own nodePort instead,
-        # whatever its requested .port happened to be (user request 2026-10-15: "if it's not
-        # a reserved service, just port forward its ports to a high port").
+        # "apps/ingress" owns 80 and 443 on POOL[0], so its listeners stay literal. The other
+        # Services hold no reservation and publish their own nodePorts, whatever their
+        # Service ports are.
         ingress = service("ingress", 443, node_port=30443)
         database = service("database", 30432, node_port=31000)
         extra = service("extra", 32000, node_port=31001)

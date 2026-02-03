@@ -55,11 +55,8 @@ def plan(services, nodes=None, slices=None, pool=None):
 
 class CompilerTests(unittest.TestCase):
     def test_unreserved_services_never_conflict_on_requested_port(self):
-        # user request 2026-10-15: "if it's not a reserved service, just port forward its
-        # ports to a high port ... that high port can be the same as the nodePort" -- the
-        # *requested* .port no longer has anything to collide over; each publishes its own
-        # nodePort instead, which Kubernetes already guarantees is unique cluster-wide. Two
-        # Services requesting the exact same literal port (80 here) is a complete non-event.
+        # Unreserved Services publish their own nodePort, which Kubernetes keeps unique
+        # cluster-wide, so two Services requesting the same Service port (80) never collide.
         a = service("a", 80, node_port=31010)
         c = service("c", 80, node_port=31011)
         result = plan([c, a])
@@ -87,9 +84,8 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("b", plan([b], pool=pool).errors)
 
     def test_claims_unclassified_ignores_foreign_and_deleting(self):
-        # No annotation or loadBalancerClass needed to get claimed (user request 2026-10-15):
-        # "a" has no loadBalancerClass at all and still gets a public IP. A Service naming a
-        # *different* class ("b") and one being deleted ("c") are still left alone.
+        # A LoadBalancer Service without a class ("a") is adopted with no annotation, like
+        # any default load balancer. Another class ("b") and a deleting Service ("c") are not.
         a, b, c = service("a"), service("b"), service("c")
         del a["spec"]["loadBalancerClass"]
         b["spec"]["loadBalancerClass"] = "other/controller"

@@ -1,84 +1,86 @@
 # Developing zlb
 
-zlb uses Python 3.11+ and the standard library. Clone
-https://github.com/abexamir/zlb and open pull requests against `main`. Contributions
-are licensed under Apache-2.0. Do not include credentials or deployment-specific state.
+zlb is Python 3.11+ with only the standard library at runtime. Open pull requests against
+`main`; contributions are licensed under Apache-2.0. Never commit credentials, kubeconfigs,
+real infrastructure addresses or deployment state.
 
-## Source layout
+## Layout
 
-- `zlb/compiler.py`: pure Kubernetes snapshot to desired listener state.
-- `zlb/pools.py`: administrator-owned pools, allowlists and reservations.
-- `zlb/model.py`: versioned wire validation, normalization and digests.
-- `zlb/controller.py`, `zlb/kube.py`: reconciliation and Kubernetes API access.
-- `zlb/natd.py`: Linux native nftables renderer, apply, readback and cleanup.
-- `zlb/addresses.py`: persistent interface-address ownership.
-- `zlb/http_api.py`: authenticated request handling and token validation.
-- `examples/`: portable installation templates using documentation addresses.
-- `charts/zlb/`: portable Helm installation.
+| Path | Contents |
+| --- | --- |
+| `zlb/controller.py`, `cache.py`, `kube.py` | reconcile loop, watch caches, Kubernetes API |
+| `zlb/compiler.py`, `pools.py` | pure Service/Node/EndpointSlice → listener compiler, pool policy |
+| `zlb/model.py` | wire format, validation, digests |
+| `zlb/natd.py`, `addresses.py`, `http_api.py` | daemon: nftables, address journal, HTTP API |
+| `zlb/bootstrap.py`, `quiesce.py` | SSH bootstrap and its upgrade quiesce hook |
+| `charts/zlb/` | Helm chart |
+| `scripts/` | `check_docs.py`, `check_chart.py`, `package_chart.py` |
+| `tests/test_*.py` | unit tests |
+| `tests/verify_*.py`, `tests/Dockerfile.nat` | privileged NAT and bootstrap integration suites |
+| `docs/` | [operator guide](docs/guide.md) and [internals](docs/internals.md) |
 
-Keep the compiler pure, validate all data before rendering rules, and preserve unrelated
-firewall ownership. A change to deletion, rollback, source ranges, port resolution or wire
-normalization should include a focused regression test. Keep the load balancer node/backend allowlists
-independent from Kubernetes pool policy.
+Keep the compiler pure, validate everything before rendering rules, and never touch firewall
+state zlb does not own. Changes to deletion, rollback, source ranges, port resolution or the
+wire format need a regression test. Keep the daemon's allowlists independent of the
+controller's pools, and keep zlb free of provider, CNI, ingress, registry or secret-manager
+assumptions. The `zlb.zarrino.tech/*` identifiers are a stable API.
 
-Maintain a generic product boundary: no assumptions about a particular provider, CNI,
-ingress controller, secret manager or registry in new examples. Pass network parameters
-explicitly. Preserve stable API identifiers unless introducing a deliberate compatibility
-change. Do not add cloud credentials or deployment-specific access policy to core code.
-
-## Tests
-
-Run the unit suite:
+## Checks
 
 ```sh
+python3 -m pip install -r requirements-dev.txt
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q zlb tests
+python3 -m compileall -q zlb tests scripts
+python3 scripts/check_docs.py      # links, anchors, examples, versions, rendered nft example
+python3 scripts/check_chart.py     # needs helm; hook order and credential separation
+helm lint charts/zlb -f examples/helm-values.yaml
 ```
 
-HTTP tests use a localhost HTTP server and needs permission to bind a local socket.
-
-Run the real NAT integration suite on a Linux container runtime:
+The integration suites need a Linux container runtime and a kernel with SCTP (`sudo modprobe sctp`):
 
 ```sh
 docker build -f tests/Dockerfile.nat -t zlb-nat-test:local .
 docker run --rm --privileged --network none zlb-nat-test:local
 ```
 
-Privilege is needed for disposable Linux network namespaces, veth links, a bridge and native
-nftables rules. The test has no host mounts or external network, and Docker's bridge is not
-part of the traffic path. It verifies real packet behavior, not just generated text.
+`verify_nat.py` builds disposable namespaces, veths and a bridge and checks real packets:
+TCP/UDP/SCTP forwarding with client source preserved, ACLs, empty-backend guards, the
+forward guard, isolation, hairpin SNAT, counters, drift repair, rollback, crash-safe cleanup
+and untouched unrelated tables. `verify_bootstrap.py` runs the real bootstrap remote script
+against a real daemon with a minimal `systemctl` stand-in: first install, token rotation,
+upgrade, and rollback of rejected candidates without losing forwarding. Never use a
+production VM or cluster in their place.
 
-The same container then runs `tests/verify_bootstrap.py`: the real SSH-bootstrap remote script
-against a real daemon, with a minimal `systemctl` stand-in that honors the unit's ExecStart,
-ExecStopPost and RuntimeDirectory. It covers first install, token rotation, upgrade, and
-rollback of rejected candidates without losing forwarding.
+## Docs and examples
 
-The suite requires kernel SCTP support and fails explicitly if unavailable. It verifies TCP,
-UDP and SCTP packet paths, source preservation, ACLs, empty-backend guards, connection survival,
-interface assignment/cleanup, rollback and preservation of an unrelated table.
+[README.md](README.md) is the entry point, [docs/guide.md](docs/guide.md) the operator guide
+and [docs/internals.md](docs/internals.md) the design reference. Keep them short, keep each
+fact in one place and link to it, and match commands to the CLI's `--help`. Use
+documentation-only addresses and example names.
 
-Do not use a production load balancer node or Kubernetes context as a substitute for these tests.
-Live installation checks need explicit target-cluster configuration and authorization.
-Never publish tokens, kubeconfigs, registry credentials or secret-bearing command output.
+## Releases
 
-## Documentation and examples
+Every push to `main` runs CI, then publishes `ghcr.io/abexamir/zlb:main` and
+`:sha-<commit>` (amd64 and arm64) and a development chart
+`oci://ghcr.io/abexamir/charts/zlb` versioned `CHART_VERSION-main.RUN.sha.SHORT` that pins
+the image digest. A tag `vX.Y.Z` publishes image `X.Y.Z` and `latest` and the stable chart
+from `charts/zlb/Chart.yaml`. Pull requests run checks only. Publishing uses `GITHUB_TOKEN`
+(`packages: write`); actions are pinned by commit and updated by Dependabot.
 
-README.md is the entry point; task-oriented guides live in `docs/`. Keep commands consistent
-with CLI `--help` and parser behavior. Validate chart output with `helm lint charts/zlb -f examples/helm-values.yaml` and
-`helm template zlb charts/zlb -f examples/helm-values.yaml`. Use documentation-only external IPs, example domains
-and explicit registry placeholders. Keep installation-specific operational notes in that installation
-repository rather than in this project.
+To release:
 
-Before a public release, choose a project license, review reference-deployment material, establish image/release provenance and a compatibility
-matrix. Do not describe those tasks as already completed.
+1. Set the same version in `pyproject.toml`, chart `appVersion`, and `image.tag` in
+   `values.yaml` and `examples/helm-values.yaml`; bump the chart `version`; update the pinned
+   commands in the docs and the chart README's upgrade notes (they ship in the chart).
+2. Merge to `main` and wait for CI and the development publish.
+3. `git tag vX.Y.Z && git push origin vX.Y.Z`. Never move a tag or reuse a chart version.
+4. Check the Publish run, both architectures and an anonymous `helm pull`, then write
+   the release notes.
 
-## Checks and publishing
+New GHCR packages start private: make the image and `charts/zlb` packages public once.
+To package a chart locally:
 
-Install optional documentation validation dependencies with
-`python3 -m pip install -r requirements-dev.txt`, then run `python3 scripts/check_docs.py`.
-The CI workflow tests Python 3.11, 3.13 and 3.14, Helm rendering, documentation examples,
-Git history secret scanning and Linux NAT behavior. Actions are pinned by commit and
-Dependabot proposes updates. Publication runs only after these checks pass.
-
-See [release maintenance](docs/releases.md) for image tags, OCI chart versions and
-release commands. Production credentials and cluster access are never required by CI.
+```sh
+python3 scripts/package_chart.py --output dist --version 0.3.0-dev.1 \
+  --image-repository ghcr.io/abexamir/zlb --image-tag sha-YOUR_COMMIT
+```
