@@ -33,10 +33,11 @@ An unreserved Service with `port: 5432` and NodePort 31543 is reached at
 
 ## When to use it
 
-[MetalLB](https://metallb.io/concepts/) and
-[Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/) give Services IPs that
-the nodes themselves announce (ARP or BGP), keeping the usual `IP:Service-port` model;
-prefer them when your network allows that. Choose zlb when only a separate machine can own
+[MetalLB](https://metallb.io/concepts/) allocates and announces Service IPs over layer 2 or
+BGP. [Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/) allocates IPs;
+Cilium's separate L2 Announcements or BGP Control Plane advertises them. These approaches
+keep the usual `IP:Service-port` model; prefer them when your network allows that.
+Choose zlb when only a separate machine can own
 the public IPs. The costs: an extra NAT hop, a machine to run, replies that must route back
 through it, IPv4 only, and no HA for that machine. Whatever you choose, let exactly one
 implementation handle unclassified LoadBalancer Services.

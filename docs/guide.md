@@ -57,22 +57,11 @@ k -n zlb-system create secret generic zlb-lb-node-token --from-file=token="$ZLB_
 SSH bootstrap copies this token to the VM. For a preprovisioned daemon, install the same
 token as `/etc/zlb/token` first. Then `rm "$ZLB_TOKEN_FILE"`.
 
-### 2. Values and Helm
+### 2. Values
 
 Start from the [example values](../examples/helm-values.yaml): set `lbNode.url` (with its
-port), `nodeCIDR` and `pools`. Then:
-
-```sh
-helm upgrade --install zlb oci://ghcr.io/abexamir/charts/zlb --version 0.3.0 \
-  --namespace zlb-system --create-namespace \
-  --kubeconfig "$ZLB_KUBECONFIG" --kube-context "$ZLB_CONTEXT" \
-  -f your-values.yaml --wait --timeout 15m
-```
-
-Keep the 15-minute timeout; the bootstrap hook installs packages on the VM. The chart runs
-one controller replica with Recreate strategy: two controllers must never drive one daemon.
-The controller is Ready only after a tick that the daemon acknowledged; that says nothing
-about your application, so test each published port from an outside client.
+port), `nodeCIDR` and `pools`. Complete either SSH bootstrap setup (3a) or daemon
+preprovisioning (3b) before running Helm in step 4.
 
 Published charts pin the image by digest, which wins over `image.tag`. For your own image
 set `image.repository`, `image.tag` and `image.digest: ""`.
@@ -124,6 +113,20 @@ follow the header of [the example unit](../examples/systemd/zlb-natd.service): i
 the user, installs the token (`root:zlb-natd`, 0640), persists IPv4 forwarding and enables
 the unit. ExecStopPost needs `--listen` and the same `--ip`, `--public-interface`,
 `--node-cidr`, `--table` and `--state-dir` as ExecStart. Keep `/var/lib/zlb` persistent.
+
+### 4. Install the controller
+
+```sh
+helm upgrade --install zlb oci://ghcr.io/abexamir/charts/zlb --version 0.3.0 \
+  --namespace zlb-system --create-namespace \
+  --kubeconfig "$ZLB_KUBECONFIG" --kube-context "$ZLB_CONTEXT" \
+  -f your-values.yaml --wait --timeout 15m
+```
+
+Keep the 15-minute timeout; the bootstrap hook installs packages on the VM. The chart runs
+one controller replica with Recreate strategy: two controllers must never drive one daemon.
+The controller is Ready only after a tick that the daemon acknowledged; that says nothing
+about your application, so test each published port from an outside client.
 
 ## Secure the load balancer node
 
