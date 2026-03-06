@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 ROOT = str(Path(__file__).resolve().parents[1])
 sys.path.insert(0, ROOT)
-from zlb.natd import Applier, listener_id, render, stable
-from zlb.model import compact, digest
+from zlb.natd import Applier, listener_id, stable
+from zlb.model import compact
 
 PUBLIC, CLIENT, CIDR = "198.51.100.10", "192.0.2.2", "10.20.0.0/24"
 NAMES = ["zlb-gw", "zlb-client", "zlb-n1", "zlb-n2"]

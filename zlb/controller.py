@@ -66,7 +66,7 @@ def same_ingress(desired, current):
     otherwise every tick would rewrite the status of every Service."""
     return (len(desired) == len(current)
             and all(d["ip"] == c.get("ip") and c.get("ipMode", d["ipMode"]) == d["ipMode"]
-                    for d, c in zip(desired, current)))
+                    for d, c in zip(desired, current, strict=True)))
 
 
 class Controller:

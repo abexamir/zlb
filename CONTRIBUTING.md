@@ -29,8 +29,8 @@ assumptions. The `zlb.zarrino.tech/*` identifiers are a stable API.
 
 ```sh
 python3 -m pip install -r requirements-dev.txt
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q zlb tests scripts
+ruff check zlb tests scripts
+coverage run -m unittest discover -s tests && coverage report   # fails below 80 %
 python3 scripts/check_docs.py      # links, anchors, examples, versions, rendered nft example
 python3 scripts/check_chart.py     # needs helm; hook order and credential separation
 helm lint charts/zlb -f examples/helm-values.yaml
@@ -48,8 +48,26 @@ TCP/UDP/SCTP forwarding with client source preserved, ACLs, empty-backend guards
 forward guard, isolation, hairpin SNAT, counters, drift repair, rollback, crash-safe cleanup
 and untouched unrelated tables. `verify_bootstrap.py` runs the real bootstrap remote script
 against a real daemon with a minimal `systemctl` stand-in: first install, token rotation,
-upgrade, and rollback of rejected candidates without losing forwarding. Never use a
-production VM or cluster in their place.
+upgrade, and rollback of rejected candidates without losing forwarding.
+
+The end-to-end test installs the chart into a [kind](https://kind.sigs.k8s.io/) cluster and
+drives real traffic through a daemon in a privileged container (needs docker, kind, kubectl
+and helm):
+
+```sh
+docker build -t zlb:e2e . && docker build -f tests/Dockerfile.nat -t zlb-nat-test:e2e .
+kind create cluster --name zlb --config tests/kind.yaml
+kind load docker-image zlb:e2e --name zlb
+python3 tests/e2e_kind.py zlb zlb:e2e zlb-nat-test:e2e
+```
+
+Never use a production VM or cluster in their place.
+
+CI runs all of the above on every pull request: ruff, actionlint (with shellcheck) and
+zizmor on the code and workflows; unit tests on Python 3.11 to 3.14; coverage; docs and
+chart checks with kubeconform schema validation; a controller image build and smoke test;
+the privileged NAT and bootstrap suites; the kind end-to-end test on two Kubernetes
+versions; and a Gitleaks scan of the history. `ci-ok` is the single status to require.
 
 ## Docs and examples
 
@@ -64,8 +82,17 @@ Every push to `main` runs CI, then publishes `ghcr.io/abexamir/zlb:main` and
 `:sha-<commit>` (amd64 and arm64) and a development chart
 `oci://ghcr.io/abexamir/charts/zlb` versioned `CHART_VERSION-main.RUN.sha.SHORT` that pins
 the image digest. A tag `vX.Y.Z` publishes image `X.Y.Z` and `latest` and the stable chart
-from `charts/zlb/Chart.yaml`. Pull requests run checks only. Publishing uses `GITHUB_TOKEN`
-(`packages: write`); actions are pinned by commit and updated by Dependabot.
+from `charts/zlb/Chart.yaml`, and creates a GitHub release. Images carry an SBOM and build
+provenance; images and charts are signed keylessly with cosign by the Publish workflow:
+
+```sh
+cosign verify ghcr.io/abexamir/zlb@sha256:DIGEST \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/abexamir/zlb/\.github/workflows/publish\.yml@'
+```
+
+Pull requests run checks only. Publishing uses `GITHUB_TOKEN` (`packages: write`) and an
+OIDC token for signing; actions are pinned by commit and updated by Dependabot.
 
 To release:
 

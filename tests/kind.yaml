@@ -1,0 +1,7 @@
+# Cluster for tests/e2e_kind.py: one control plane and one worker, so Local traffic policy
+# selects a subset of nodes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker

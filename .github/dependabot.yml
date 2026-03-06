@@ -4,7 +4,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: docker
+    directories: [/, /tests]
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    groups:
+      dev-tools:
+        patterns: ["*"]

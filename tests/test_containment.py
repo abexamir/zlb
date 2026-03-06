@@ -1,4 +1,3 @@
-import json
 from http.client import HTTPConnection
 from pathlib import Path
 import tempfile
