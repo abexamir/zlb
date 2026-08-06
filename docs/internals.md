@@ -12,6 +12,7 @@ Examples use the guide's topology plus Ready nodes `10.0.0.11` and `10.0.0.12`.
 - [SSH bootstrap](#ssh-bootstrap)
 - [Failures and restarts](#failures-and-restarts)
 - [Limits and non-goals](#limits-and-non-goals)
+- [Future: high availability](#future-high-availability)
 - [Source map](#source-map)
 
 ## Components and ownership
@@ -326,8 +327,36 @@ There are no active health checks: Node and EndpointSlice readiness decide eligi
 | Addresses | more than one IP per Service; provider IP acquisition, route discovery, ARP announcement, DNS |
 | Balancing | health probes, session affinity, weights, least-connections (conntrack gives flow affinity only) |
 | Service fields | `sessionAffinity`, `healthCheckNodePort`, `trafficDistribution`, other LB annotations are ignored; `spec.loadBalancerIP` is rejected |
-| Ports | arbitrary public ports; literal ports come only from administrator reservations |
+| Ports | publishing on the Service port by default: with scarce IPs, NodePorts are the collision-free allocator; literal ports come only from administrator reservations |
 | Datapath | SNAT except the opt-in hairpin, OUTPUT NAT, conntrack flushing, TLS termination, PROXY protocol |
+
+## Future: high availability
+
+The load balancer node is a single point of failure today. The planned design keeps the
+single-entry-point model and adds a standby:
+
+```mermaid
+flowchart LR
+    client([Client]) -->|public IP| vip{{floating public IPs}}
+    vip --> a[LB node A · active]
+    vip -.->|on failover| b[LB node B · standby]
+    a <-.->|conntrackd flow sync| b
+    ctl[zlb controller] ==>|same state| a
+    ctl ==>|same state| b
+    a --> nodes[node:NodePort]
+    b -.-> nodes
+```
+
+| Piece | Plan |
+| --- | --- |
+| Rules | Both nodes carry the identical `table ip zlb`. Rules match the destination IP, so they are inert where the address is absent. |
+| Addresses | Only the active node holds the public IPs, moved by VRRP (keepalived) or a provider's failover-IP API. The daemon gets a mode that leaves addresses to that tool. |
+| Connections | conntrackd synchronises flow state so established connections survive a failover. |
+| Controller | Pushes to every daemon, and publishes status or releases finalizers only after all of them (or a configured quorum) acknowledge, which keeps the acknowledge-before-publish guarantee. |
+| Return path | Node-side return routing targets a floating node-side address that moves with the active node. |
+
+Most of the work is in the controller (multiple targets and acknowledgements) and one daemon
+flag; the nftables datapath already fits.
 
 ## Source map
 
