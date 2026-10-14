@@ -12,6 +12,7 @@ import struct
 import subprocess
 import threading
 
+from .routes import Routes
 from .addresses import Addresses
 from .http_api import APIServer, make_handler, read_token, server_context
 from .model import NODE_PORTS, VERSION, VERSIONS, digest, expand, port_range, validate_state
@@ -217,12 +218,13 @@ def stable(value):
 class Applier:
     def __init__(self, allowed_ips, node_cidr, interface, state_dir="/var/lib/zlb",
                  forbidden_ports=(), table="zlb", backend_ports=NODE_PORTS, guard_forwarding=True,
-                 isolate_public=False, hairpin=()):
+                 isolate_public=False, hairpin=(), routes=()):
         self.table = table_name(table)
         self.node_cidr = str(ipaddress.IPv4Network(node_cidr))
         self.forbidden_ports = forbidden_ports
         self.backend_ports = backend_ports
         self.addresses = Addresses(self.command, interface, allowed_ips, Path(state_dir) / f"{table}-addresses.json")
+        self.routes = Routes(self.command, routes, Path(state_dir) / f"{table}-routes.json")
         self.allowed_ips = sorted(self.addresses.desired, key=ipaddress.IPv4Address)
         self.guard_interface = interface if guard_forwarding else None
         self.isolate_public = isolate_public
@@ -311,6 +313,7 @@ class Applier:
         revision = digest(state)
         with self.lock:
             before_addresses = self.addresses.owned.copy()
+            before_routes = None
             # The controller re-sends its full state every tick. When it is the verified state
             # and the table has not drifted, only re-assert the addresses. An unchanged ruleset
             # generation proves the latter without listing the table; after any other ruleset
@@ -323,8 +326,10 @@ class Applier:
                 self.last_generation = generation
                 try:
                     self.addresses.add()
+                    before_routes = self.routes.reconcile()
                     self.addresses.retire()
                 except Exception:
+                    self.restore_routes(before_routes)
                     self.restore_addresses(before_addresses)
                     raise
                 return revision
@@ -340,9 +345,11 @@ class Applier:
                 generation = self.generation()
                 actual = self.snapshot()
                 self.verify(state, actual)
+                before_routes = self.routes.reconcile()
                 self.addresses.retire()
             except Exception:
                 self.current_digest, self.last_fingerprint, self.last_generation = None, None, None
+                self.restore_routes(before_routes)
                 self.restore_addresses(before_addresses)
                 try:
                     now = self.snapshot()
@@ -361,6 +368,12 @@ class Applier:
             LOG.info("applied revision=%s listeners=%d", revision, len(state["listeners"]))
             return revision
 
+    def restore_routes(self, before):
+        try:
+            self.routes.restore(before)
+        except Exception:
+            LOG.exception("ROUTE ROLLBACK FAILED; operator attention required")
+
     def restore_addresses(self, owned):
         try:
             self.addresses.restore(owned)
@@ -374,6 +387,7 @@ class Applier:
     def cleanup(self):
         if self.snapshot():
             self.command("nft", "delete", "table", "ip", self.table)
+        self.routes.cleanup()
         self.addresses.cleanup()
 
 
@@ -406,6 +420,8 @@ def main():
     parser.add_argument("--hairpin-snat-from", action="append", default=[], type=ipaddress.IPv4Network,
                         help="Masquerade listener connections from this CIDR (repeatable), e.g. the "
                              "node CIDR, so in-cluster clients can reach the public IPs")
+    parser.add_argument("--route", action="append", default=[], type=json.loads,
+                        help="Opt-in main-table IPv4 route as JSON: destination, interface, optional gateway")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
     if not args.cleanup and not args.token_file:
@@ -419,7 +435,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
                       args.reserved_port + [args.port], args.table, args.backend_port_range,
-                      not args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from)
+                      not args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from, args.route)
     token = None
     if not args.cleanup:
         read_token(args.token_file)  # fail fast on a missing or invalid token

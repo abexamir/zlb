@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from .http_api import read_token
 from .model import NODE_PORTS, canonical, port_range
+from .routes import route
 
 LOG = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ SystemCallErrorNumber=EPERM
 
 def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS, tls=False,
          client_ca=False, allow_from=(), allow_foreign_forwarding=False, isolate_public=False,
-         hairpin=()):
+         hairpin=(), routes=()):
     first,last=(int(x) for x in backend_ports)
     if not 1<=first<=last<=65535:
         raise ValueError('invalid backend port range')
@@ -210,6 +211,8 @@ def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS, tls=
     if allow_foreign_forwarding: args.append('--allow-foreign-forwarding')
     if isolate_public: args.append('--isolate-public-ips')
     for network in hairpin: args.extend(['--hairpin-snat-from',str(ipaddress.IPv4Network(network))])
+    for value in routes:
+        args.extend(['--route',json.dumps(route(value),separators=(',',':'))])
     # Share the privileged daemon's exact validation before generating any shell/systemd input.
     from .addresses import Addresses
     validated=Addresses(None,interface,ips,'/nonexistent/zlb-bootstrap-journal')
@@ -235,7 +238,7 @@ WantedBy=multi-user.target
 class SSHBootstrap:
     def __init__(self, host, user, key_file, known_hosts, token_file, listen, port, ips, interface,
                  node_cidr, ssh_port=22, backend_ports=NODE_PORTS, tls_files=None, allow_from=(),
-                 allow_foreign_forwarding=False, isolate_public=False, hairpin=()):
+                 allow_foreign_forwarding=False, isolate_public=False, hairpin=(), routes=()):
         ipaddress.IPv4Address(host)
         if not user or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in user):
             raise ValueError('invalid SSH user')
@@ -249,7 +252,7 @@ class SSHBootstrap:
             raise ValueError('TLS needs tls.crt and tls.key, optionally client-ca.crt')
         self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports,bool(self.tls_files),
                        'client-ca.crt' in self.tls_files,allow_from,allow_foreign_forwarding,isolate_public,
-                       hairpin)
+                       hairpin, routes)
 
     def payload(self):
         files={path.name:path.read_text() for path in Path(__file__).parent.glob('*.py')}
@@ -309,6 +312,8 @@ def main(argv=None):
     parser.add_argument("--hairpin-snat-from", action="append", default=[], type=ipaddress.IPv4Network,
                         help="Masquerade listener connections from this CIDR so in-cluster clients "
                              "can reach the public IPs (repeatable)")
+    parser.add_argument("--route", action="append", default=[], type=json.loads,
+                        help="Optional main-table route JSON: destination, interface, gateway")
     args = parser.parse_args(argv)
     endpoint = urlparse(args.lb_node)
     if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
@@ -329,7 +334,7 @@ def main(argv=None):
                      args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port,
                      args.ip, args.public_interface, args.node_cidr, args.ssh_port,
                      args.backend_port_range, tls_files, args.allow_from,
-                     args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from).ensure()
+                     args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from, args.route).ensure()
     except Exception:
         LOG.exception("load balancer node bootstrap failed")
         return 1
