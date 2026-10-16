@@ -36,7 +36,7 @@ kubectl --kubeconfig "$ZLB_KUBECONFIG" --context "$ZLB_CONTEXT" -n zlb-system \
   kubectl --kubeconfig "$ZLB_KUBECONFIG" --context "$ZLB_CONTEXT" apply -f -
 ```
 
-With SSH bootstrap enabled, the controller installs the token on the VM automatically.
+With SSH bootstrap enabled, the bootstrap Job installs the token on the VM automatically.
 With a preprovisioned daemon, securely install the same token at `/etc/zlb/token` on the
 VM before removing the staging file. Then run `rm "$ZLB_TOKEN_FILE"`.
 
@@ -66,7 +66,7 @@ The chart deploys one controller with Recreate strategy, RBAC and pool configura
 requires a successful load balancer node apply and Kubernetes reconciliation. It does not imply the
 application itself is healthy. Test each published port from an external client.
 
-## Optional controller-driven VM setup
+## Optional SSH bootstrap of the VM
 
 Set these values in addition to the load balancer node URL and token Secret:
 
@@ -94,20 +94,38 @@ The SSH Secret must contain `private_key` and `known_hosts`. Generate a dedicate
 VM and obtain its host public key from your provisioning system. Host verification is strict;
 there is no automatic trust-on-first-use. Non-root users need passwordless sudo.
 
-The controller uses SSH to install Python if missing, nftables/iproute2, its own daemon
-package, `/etc/zlb/token` and `zlb-natd.service`. It enables IPv4 forwarding and starts the
-service. It rechecks the installed revision, files and service every minute, and retries after
-failures. Unchanged installations are not restarted. Package/configuration failure attempts to
+Bootstrap runs as a Helm `pre-install`/`pre-upgrade` hook Job, `<release>-controller-bootstrap`.
+It uses SSH to install Python if missing, nftables/iproute2, the daemon package,
+`/etc/zlb/token` and `zlb-natd.service`. It enables IPv4 forwarding and starts the service.
+Unchanged installations are not restarted. Package or configuration failures attempt to
 restore the prior daemon package, unit and token. OS package operations are not rolled back.
+A failed Job fails the Helm install or upgrade and stays for inspection
+(`kubectl logs job/<release>-controller-bootstrap`).
+
+The SSH key is root-equivalent on the VM, so only the bootstrap pod mounts it. That pod has
+no Kubernetes API token. The long-running controller has API access but never sees the key.
+To repair drift between upgrades (for example after rebuilding the VM), set
+`bootstrap.schedule` to a cron expression. A CronJob then reruns the same one-shot pod.
+
+On `helm upgrade` and `helm rollback`, an earlier `-quiesce` hook Job stops every other
+bootstrap writer before the bootstrap hook runs. That covers the drift-repair CronJob and
+its running Jobs, and also a controller from before this split (0.4.0 and earlier), which
+ran SSH bootstrap itself. The quiesce Job has namespace-scoped API access and no SSH key.
+It waits until those pods are gone, so no older payload can reinstall the daemon after the
+hook. The daemon is therefore updated before the new controller starts. The upgrade then
+restores the controller to one replica and resumes the CronJob. If the bootstrap hook
+fails, the upgrade fails and the CronJob stays suspended. A legacy controller that the
+quiesce Job scaled down also stays down until a later upgrade or `helm rollback` succeeds.
+Forwarding rules keep serving meanwhile.
 
 Bootstrap currently targets Debian/Ubuntu with apt and systemd on a trusted private HTTP API
-path (`lbNode.allowPrivateHTTP: true`). The controller needs root-equivalent access on that
-VM, so scope the SSH key and Kubernetes Secret permissions accordingly. Keep routing, the VM's
-firewall, upstream address allocation and platform lifecycle in IaC. The VM never joins Kubernetes.
+path (`lbNode.allowPrivateHTTP: true`). Scope the SSH key and the namespace's Secret read
+permissions accordingly. Keep routing, the VM's firewall, upstream address allocation and
+platform lifecycle in IaC. The VM never joins Kubernetes.
 
 For an IaC installation, derive VM addressing and SSH Secrets from VM/key resources and make
-the Helm release depend on their readiness. A single IaC update can create the VM, install Helm
-and let the controller complete host setup. The chart itself does not create infrastructure.
+the Helm release depend on their readiness. A single IaC update can create the VM, then run
+Helm, whose bootstrap hook completes host setup. The chart itself does not create infrastructure.
 
 ## Preprovisioned daemon
 
