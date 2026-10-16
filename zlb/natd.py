@@ -100,7 +100,6 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
     node_cidr = str(ipaddress.IPv4Network(node_cidr))
     ips = sorted(allowed_ips if allowed_ips is not None else {x["ip"] for x in state["listeners"]},
                  key=ipaddress.IPv4Address)
-    revision = digest(state)
     dispatch, guard, objects = [], [], []
     for listener in expand(state):
         proto, lid = listener["protocol"].lower(), listener_id(listener)

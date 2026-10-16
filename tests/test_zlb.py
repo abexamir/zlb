@@ -1,5 +1,4 @@
 import copy
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +7,7 @@ from unittest.mock import Mock, patch
 from zlb.compiler import compile_state
 from zlb.controller import Controller, LoadBalancerNode
 from zlb.kube import Kubernetes
-from zlb.model import CLASS, FINALIZER, PREFIX, PUBLISHED, digest, expand, validate_state
+from zlb.model import CLASS, FINALIZER, PREFIX, PUBLISHED, expand
 from zlb.pools import PoolConfig
 
 POOL = ["198.51.100.10"]

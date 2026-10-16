@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
-from zlb.model import NODE_PORTS, VERSION, digest, expand, port_range, validate_state
+from zlb.model import NODE_PORTS, digest, expand, port_range, validate_state
 from zlb.natd import Applier, cleanup_reason, host_guards, layout, listener_id, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 

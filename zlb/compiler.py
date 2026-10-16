@@ -2,7 +2,7 @@
 import ipaddress
 from dataclasses import dataclass, field
 
-from .model import CLASS, PREFIX, PROTOCOLS, compact, port, validate_state
+from .model import CLASS, PROTOCOLS, compact, port, validate_state
 from .pools import PoolConfig, contains
 
 
@@ -77,7 +77,6 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
         meta, spec = svc["metadata"], svc["spec"]
         uid = meta["uid"]
         identity = f"{meta['namespace']}/{meta['name']}"
-        annotations = meta.get("annotations", {})
         try:
             ports = spec.get("ports", [])
             if not ports:
@@ -120,7 +119,7 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
                                      f"backend range {backend_ports[0]}-{backend_ports[1]}")
                 resolved.append(public_port)
             own = []
-            for p, public_port in zip(ports, resolved):
+            for p, public_port in zip(ports, resolved, strict=True):
                 protocol = p.get("protocol", "TCP")
                 backends = addresses
                 if spec.get("externalTrafficPolicy", "Cluster") == "Local":
@@ -150,6 +149,6 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
         listeners.extend(own)
         # Unreserved ports are published on their NodePort, not the Service port, so record
         # the mapping on the Service in the style of kubectl's PORT(S) column.
-        published[uid] = ",".join(f"{number}:{x['port']}/{x['protocol']}" for number, x in zip(service_ports, own))
+        published[uid] = ",".join(f"{number}:{x['port']}/{x['protocol']}" for number, x in zip(service_ports, own, strict=True))
     return Plan(validate_state(compact(listeners), config.ips, node_cidr),
                 assignments, errors, published)
