@@ -2,7 +2,7 @@
 
 # zlb
 
-**Public IPs for Kubernetes `LoadBalancer` Services, served from any Linux machine.**
+**Many `LoadBalancer` Services on a few public IPs, through one hardened entry node.**
 
 [![CI](https://github.com/abexamir/zlb/actions/workflows/ci.yml/badge.svg)](https://github.com/abexamir/zlb/actions/workflows/ci.yml)
 [![Publish](https://github.com/abexamir/zlb/actions/workflows/publish.yml/badge.svg)](https://github.com/abexamir/zlb/actions/workflows/publish.yml)
@@ -10,8 +10,8 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![nftables](https://img.shields.io/badge/datapath-nftables-orange)
 
-No cloud load balancer, BGP or layer 2 for your nodes? Put the public IPs on one Linux
-machine and let zlb turn your Services into kernel DNAT rules there.
+Public IPs are scarce and your nodes take no inbound internet traffic? Route the IPs to one
+Linux machine and let zlb turn your Services into kernel DNAT rules there.
 
 </div>
 
@@ -29,20 +29,45 @@ flowchart LR
     natd <==>|desired state ⇄ ack| ctl
 ```
 
-## Why zlb
+## Designed for
 
-| | MetalLB · Cilium with LB IPAM | **zlb** |
-| --- | --- | --- |
-| Who holds the public IP | cluster nodes, announced over L2 or BGP | **one external Linux machine** |
-| Network requirement | L2 adjacency or a BGP peer | **routing to that machine** |
-| Clients connect to | `IP:servicePort` | `IP:nodePort`, or literal ports you reserve |
-| Many Services per IP | opt-in sharing | **by default** |
-| Trade-off | announcement speakers on nodes | one NAT hop, one extra machine, no HA |
+- **Few public IPs, many Services.** Every Service shares the pool's IPs, published on its
+  NodePort. Kubernetes already keeps NodePorts unique cluster-wide, so sharing never needs
+  coordination.
+- **Nodes without inbound internet access.** All external traffic enters through one machine
+  that forwards only to NodePorts, enforces `loadBalancerSourceRanges` before the cluster,
+  and refuses to route anything else into the node network: a DMZ for your Services.
 
-[Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/) allocates addresses;
-Cilium's separate L2 Announcements or BGP Control Plane advertises them. Prefer MetalLB or
-Cilium when your network allows them; choose zlb when only a separate machine can own the
-addresses. Let exactly one implementation handle unclassified LoadBalancer Services.
+Two PostgreSQL Services that both declare port 5432 share one IP without conflict:
+
+```text
+apps/orders-db   5432 → NodePort 31543   →  198.51.100.10:31543
+apps/billing-db  5432 → NodePort 30876   →  198.51.100.10:30876
+ingress/ingress  80, 443 (reserved)      →  198.51.100.10:80, 198.51.100.10:443
+```
+
+Literal ports such as 80/443, or a whole IP, are explicit administrator reservations, so the
+scarce ones go where you decide.
+
+## Compared with
+
+| | MetalLB | Cilium LB IPAM | kube-vip | **zlb** |
+| --- | --- | --- | --- | --- |
+| Who answers for the public IP | a node (L2 leader) or all nodes (BGP) | a node (L2 Announcements) or BGP Control Plane | a node (ARP leader) or BGP | **one machine outside the cluster** |
+| Network requirement | shared L2 segment or a BGP router | shared L2 segment or a BGP router | shared L2 segment or a BGP router | **IPs routed to that machine** |
+| Nodes reachable from the internet | yes | yes | yes | **no** |
+| Clients connect to | `IP:servicePort` | `IP:servicePort` | `IP:servicePort` | `IP:nodePort`, or reserved literal ports |
+| Same port on one IP (two `:5432`) | no, needs a second IP | no, needs a second IP | no, needs a second IP | **yes** |
+| IP sharing | opt-in annotation | opt-in sharing key | shared address | **default** |
+| Datapath | kube-proxy or CNI on the node | eBPF on the node | kube-proxy or IPVS on the node | nftables DNAT on the entry node, then NodePort |
+| Source ranges enforced | on the nodes | on the nodes | on the nodes | **on the entry machine** |
+| Failover | yes (L2 leader election, BGP ECMP) | yes (L2 leases, BGP) | yes (leader election, BGP) | not yet ([planned](docs/internals.md#future-high-availability)) |
+| Extra cost | speakers on nodes | requires Cilium | daemons on nodes | one machine, one NAT hop |
+
+MetalLB, Cilium and kube-vip suit networks where nodes may own public addresses. zlb suits
+networks where they must not, or cannot. [Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/)
+only allocates; Cilium's separate L2 Announcements or BGP Control Plane advertises. Let
+exactly one implementation handle unclassified LoadBalancer Services.
 
 ## Features
 
@@ -56,11 +81,6 @@ addresses. Let exactly one implementation handle unclassified LoadBalancer Servi
 | 🔐 **Secure** | TLS/mTLS API, sandboxed non-root daemon, controller confined by an admission policy |
 | ⚙️ **Hands-off** | optional SSH bootstrap installs and upgrades the daemon from Helm |
 | ⚡ **Fast** | one map lookup per packet; re-sending an unchanged state costs milliseconds |
-
-```text
-Service port 5432, NodePort 31543   →  198.51.100.10:31543
-Reserved ingress ports 80 and 443   →  198.51.100.10:80, 198.51.100.10:443
-```
 
 ## Quick start
 
@@ -102,5 +122,6 @@ never in public issues. Hardening (TLS/mTLS, `--allow-from`, the root-equivalent
 bootstrap key) is covered in [securing the load balancer node](docs/guide.md#secure-the-load-balancer-node).
 
 **Scope:** IPv4 on Linux with nftables; one controller per load balancer node. No IPv6,
-load balancer node HA, health probes or Prometheus metrics; in-cluster clients reach public
-IPs only with the opt-in hairpin SNAT. Apache-2.0.
+health probes or Prometheus metrics; in-cluster clients reach public IPs only with the
+opt-in hairpin SNAT. Load balancer node HA is the next
+[design target](docs/internals.md#future-high-availability). Apache-2.0.
