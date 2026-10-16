@@ -1,6 +1,7 @@
 """Real TCP/UDP/SCTP and nftables/address lifecycle tests in isolated Linux namespaces."""
 import copy
 import json
+import os
 from pathlib import Path
 import select
 import subprocess
@@ -248,6 +249,13 @@ def main():
         assert read_line(held) == before
         assert outside() == baseline
         print("PASS: removing listeners preserves existing flow and leaves unrelated nftables untouched", flush=True)
+        crash = subprocess.run(["ip", "netns", "exec", "zlb-gw", "python3", "-m", "zlb.natd", "--cleanup", "--listen", "127.0.0.1",
+                                "--ip", PUBLIC, "--public-interface", "zlb-wan", "--node-cidr", CIDR, "--state-dir", temporary.name],
+                               env=dict(os.environ, SERVICE_RESULT="signal"), capture_output=True, text=True, timeout=60)
+        assert crash.returncode == 0 and "keeping zlb forwarding" in crash.stderr, crash.stderr
+        assert restarted.snapshot() is not None
+        assert ("zlb-wan", PUBLIC + "/32") in restarted.addresses.inventory()
+        print("PASS: ExecStopPost cleanup after a crash keeps the table and addresses for the restart", flush=True)
         restarted.cleanup()
         assert restarted.snapshot() is None
         assert ("zlb-wan", PUBLIC + "/32") not in restarted.addresses.inventory()

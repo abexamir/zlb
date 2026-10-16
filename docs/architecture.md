@@ -101,8 +101,14 @@ zlb favors preserving administrator addresses over deleting an uncertain address
   There is no expiry lease or automatic shutdown of stale listeners.
 - Load balancer node API outage: the controller retries. It cannot publish new assignments or release
   cleanup finalizers until the load balancer node confirms the state.
-- Daemon process restart: an existing owned table remains until a fresh push. A normal
-  systemd stop runs cleanup, so a managed restart has a reconciliation gap.
+- Daemon crash: systemd restarts it, and the unit's cleanup sees `$SERVICE_RESULT` is not
+  `success` and keeps the table and addresses, so forwarding continues. The restarted
+  daemon keeps the table until the next push.
+- Managed restart (a bootstrap upgrade, or `touch /run/zlb/zlb.keep` before
+  `systemctl restart`): the keep marker makes cleanup leave forwarding in place; systemd
+  removes the marker with the runtime directory. A token rotation needs no restart at all,
+  because the daemon re-reads its token file for every request.
+- `systemctl stop` without the marker: cleanup removes the owned table and addresses.
 - Load balancer node reboot: the daemon reassigns configured addresses from its persistent journal,
   installs an empty table and waits for the controller. Dynamic firewall rules are not persisted.
 - Load balancer node failure: traffic through that load balancer node fails. Controller replicas do not make the

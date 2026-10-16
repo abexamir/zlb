@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
 from zlb.model import NODE_PORTS, VERSION, digest, expand, port_range, validate_state
-from zlb.natd import Applier, host_guards, layout, listener_id, render, stable
+from zlb.natd import Applier, cleanup_reason, host_guards, layout, listener_id, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
 IP = "198.51.100.10"
@@ -303,3 +303,15 @@ class ApplyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.a.cleanup()
         self.a.command.assert_not_called()
         self.a.addresses.cleanup.assert_not_called()
+
+
+class CleanupDecisionTests(unittest.TestCase):
+    def test_only_a_clean_stop_without_keep_marker_cleans_up(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            self.assertIsNone(cleanup_reason("zlb", runtime, {}))                       # operator run by hand
+            self.assertIsNone(cleanup_reason("zlb", runtime, {"SERVICE_RESULT": "success"}))
+            for result in ("exit-code", "signal", "core-dump", "watchdog", "oom-kill"):
+                self.assertIn("abnormally", cleanup_reason("zlb", runtime, {"SERVICE_RESULT": result}))
+            Path(runtime, "zlb.keep").touch()
+            self.assertIn("managed restart", cleanup_reason("zlb", runtime, {"SERVICE_RESULT": "success"}))
+            self.assertIsNone(cleanup_reason("other", runtime, {"SERVICE_RESULT": "success"}))

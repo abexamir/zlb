@@ -232,16 +232,18 @@ env DEBIAN_FRONTEND=noninteractive apt-get install -y nftables iproute2
 ```
 
 It refuses to replace an existing `zlb-natd.service` that does not invoke `-m zlb.natd`.
-For an update it backs up the previous package, unit, token and revision marker, then:
+For an update it backs up the previous package, unit and files. A change to the token
+alone is written in place: the daemon re-reads its token for every request, so it is not
+restarted. Otherwise the new package is staged and swapped in with directory renames, then:
 
 ```sh
-# Run only when a previous unit exists:
-systemctl stop zlb-natd.service
 # Files are written by Python, with temporary files, fsync and os.replace.
 sysctl -w net.ipv4.ip_forward=1
 systemd-analyze verify /etc/systemd/system/zlb-natd.service
 systemctl daemon-reload
-systemctl enable --now zlb-natd.service
+systemctl enable zlb-natd.service
+# When it was running: touch /run/zlb/zlb.keep, so the stop keeps forwarding in place.
+systemctl restart zlb-natd.service      # or: systemctl start, on first install
 systemctl is-active --quiet zlb-natd.service
 ```
 
@@ -309,8 +311,9 @@ filesystem and kernel tunables read-only, and restricts address families and sys
 `systemd-analyze security` rates it 2.1 (OK). Infrastructure may add routing dependencies or an
 `ExecStartPost` drop-in without changing the generated unit itself.
 
-On failure bootstrap stops the candidate, restores package/unit/token/marker and reloads
-systemd. It starts the old service only if it was previously running. Apt package changes,
+On failure bootstrap restores the package, unit and files and reloads systemd. If the old
+service was running it restarts it, again with the keep marker; otherwise it stops the
+candidate. A rollback problem is reported without hiding the original error. Apt package changes,
 the forwarding sysctl, enablement state and infrastructure changes are not transactional
 rollback targets. A failed first install must be inspected; a stopped but enabled candidate
 can restart after reboot. Bootstrap verifies local service activity and a receipt hash;
@@ -848,10 +851,10 @@ Adding pools alone cannot expand the daemon's allowlist. Configure upstream reac
 Changing port reservations can change public endpoints without changing a Service manifest.
 
 **Token rotation:** update the Kubernetes Secret and installed daemon token coherently.
-The controller rereads its mounted token for requests; the daemon reads its token at startup.
-There is no overlapping-token grace period or native hot reload. With bootstrap, the next
-check notices payload drift and replaces the token/unit/package as needed. Kubernetes Secret
-propagation is asynchronous. Expect a reconciliation gap during uncoordinated rotation.
+The controller and the daemon both re-read their token file for every request. With
+bootstrap, the next run writes a changed token in place and does not restart the daemon.
+There is no overlapping-token grace period, and Kubernetes Secret propagation is
+asynchronous, so expect rejected pushes (401) until both sides agree.
 
 **Delete or revert a Service:** while the controller and daemon still work:
 
@@ -868,11 +871,14 @@ clear ingress status and remove its own finalizer. Other finalizers survive. If 
 acknowledge, deletion can remain pending. Removing Services does not remove all configured
 host IPs; addresses are retired when the daemon allowlist changes or cleanup runs.
 
-**Process exit versus systemd stop:** an arbitrary process exit leaves kernel rules in
-place. The provided systemd unit runs `ExecStopPost ... --cleanup` on stop/restart and can
-therefore remove the table and owned IPs, including during service failure/restart. After
-reboot, ephemeral kernel state must be recreated; the controller's next snapshot restores it.
-Do not claim uninterrupted connections across host reboot or a managed stop/restart.
+**Process exit versus systemd stop:** systemd runs the unit's `ExecStopPost ... --cleanup`
+after every stop. Cleanup only removes the table and owned IPs when `$SERVICE_RESULT` is
+`success` and `/run/zlb/<table>.keep` is absent. After a crash (`exit-code`, `signal`,
+`core-dump`, ...) systemd restarts the daemon with forwarding intact. Bootstrap upgrades
+write the keep marker before `systemctl restart`, so they do not interrupt forwarding either;
+operators can do the same. If the unit hits its start limit and stays failed, the rules stay
+installed; run `--cleanup` manually to remove them. After a reboot, ephemeral kernel state
+must be recreated; the controller's next snapshot restores it.
 
 **Uninstall:** first delete/convert managed Services and wait for cleanup finalizers. Then:
 
