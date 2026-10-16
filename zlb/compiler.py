@@ -2,7 +2,7 @@
 import ipaddress
 from dataclasses import dataclass
 
-from .model import CLASS, PREFIX, PROTOCOLS, VERSION, port, validate_state
+from .model import CLASS, PREFIX, PROTOCOLS, compact, port, validate_state
 from .pools import PoolConfig, contains
 
 
@@ -107,9 +107,8 @@ def compile_state(services, nodes, slices, pool, node_cidr):
                     names = local_nodes.get(key, set())
                     backends = {n: addresses[n] for n in names}
                 listeners.append(dict(ip=ip, port=public_port, protocol=protocol, source_ranges=ranges,
-                                      backends=[dict(ip=a, port=p["nodePort"])
-                                                for _, a in sorted(backends.items())]))
+                                      backend_port=p["nodePort"], backend_set=tuple(sorted(backends.values()))))
         except (ValueError, TypeError, KeyError) as exc:
             errors[uid] = str(exc)
-    return Plan(validate_state({"version": VERSION, "listeners": listeners}, config.ips, node_cidr),
+    return Plan(validate_state(compact(listeners), config.ips, node_cidr),
                 assignments, errors)
