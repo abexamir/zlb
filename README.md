@@ -31,7 +31,7 @@ flowchart LR
 
 ## Why zlb
 
-| | MetalLB · Cilium LB IPAM | **zlb** |
+| | MetalLB · Cilium with LB IPAM | **zlb** |
 | --- | --- | --- |
 | Who holds the public IP | cluster nodes, announced over L2 or BGP | **one external Linux machine** |
 | Network requirement | L2 adjacency or a BGP peer | **routing to that machine** |
@@ -39,8 +39,10 @@ flowchart LR
 | Many Services per IP | opt-in sharing | **by default** |
 | Trade-off | announcement speakers on nodes | one NAT hop, one extra machine, no HA |
 
-Prefer MetalLB or Cilium when your network allows them; choose zlb when only a separate
-machine can own the addresses.
+[Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/) allocates addresses;
+Cilium's separate L2 Announcements or BGP Control Plane advertises them. Prefer MetalLB or
+Cilium when your network allows them; choose zlb when only a separate machine can own the
+addresses. Let exactly one implementation handle unclassified LoadBalancer Services.
 
 ## Features
 
