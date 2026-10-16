@@ -12,8 +12,12 @@ lbNode:
   allowPrivateHTTP: false
   existingSecret: ""
   tokenKey: token
-  # Optional existing ConfigMap containing a CA certificate under ca.crt.
+  # Optional existing ConfigMap containing the CA that signed the daemon's HTTPS
+  # certificate, under ca.crt.
   caConfigMap: ""
+  # Optional existing kubernetes.io/tls Secret (tls.crt, tls.key) the controller presents
+  # to a daemon that requires client certificates.
+  clientCertSecret: ""
 nodeCIDR: ""
 interval: 5
 pools:
@@ -52,6 +56,13 @@ bootstrap:
   # The daemon only forwards to backend ports in this range. Match the cluster's
   # --service-node-port-range.
   backendPortRange: "30000-32767"
+  # With an https:// lbNode.url: existing Secret holding the daemon's HTTPS certificate
+  # (tls.crt, with an IP SAN for the lbNode.url host) and key (tls.key). Add ca.crt and set
+  # requireClientCertificates to make the daemon demand lbNode.clientCertSecret.
+  tlsSecret: ""
+  requireClientCertificates: false
+  # Optional CIDRs allowed to connect to the daemon API, e.g. your node CIDR.
+  apiAllowFrom: []
   # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
   # bootstrap only on Helm install and upgrade.
   schedule: ""

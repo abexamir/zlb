@@ -70,6 +70,19 @@ spec:
         {{- end }}
         - {{ printf "--node-cidr=%s" (required "nodeCIDR is required" .Values.nodeCIDR) | quote }}
         - {{ printf "--backend-port-range=%s" .Values.bootstrap.backendPortRange | quote }}
+        {{- if hasPrefix "https://" .Values.lbNode.url }}
+        {{- if not .Values.bootstrap.tlsSecret }}{{ fail "an https:// lbNode.url with bootstrap requires bootstrap.tlsSecret" }}{{ end }}
+        - --tls-cert-file=/var/run/zlb-tls/tls.crt
+        - --tls-key-file=/var/run/zlb-tls/tls.key
+        {{- if .Values.bootstrap.requireClientCertificates }}
+        - --tls-client-ca-file=/var/run/zlb-tls/ca.crt
+        {{- end }}
+        {{- else if or .Values.bootstrap.tlsSecret .Values.bootstrap.requireClientCertificates }}
+        {{- fail "bootstrap.tlsSecret and requireClientCertificates need an https:// lbNode.url" }}
+        {{- end }}
+        {{- range .Values.bootstrap.apiAllowFrom }}
+        - {{ printf "--allow-from=%s" . | quote }}
+        {{- end }}
       resources:
         {{- toYaml .Values.bootstrap.resources | nindent 8 }}
       securityContext:
@@ -81,6 +94,9 @@ spec:
         - {name: tmp, mountPath: /tmp}
         - {name: ssh, mountPath: /var/run/zlb-ssh, readOnly: true}
         - {name: token, mountPath: /var/run/zlb, readOnly: true}
+        {{- if .Values.bootstrap.tlsSecret }}
+        - {name: tls, mountPath: /var/run/zlb-tls, readOnly: true}
+        {{- end }}
   volumes:
     - name: tmp
       emptyDir:
@@ -97,6 +113,12 @@ spec:
         items:
           - key: {{ .Values.lbNode.tokenKey | quote }}
             path: token
+    {{- if .Values.bootstrap.tlsSecret }}
+    - name: tls
+      secret:
+        secretName: {{ .Values.bootstrap.tlsSecret }}
+        defaultMode: 0440
+    {{- end }}
   {{- with .Values.nodeSelector }}
   nodeSelector:
     {{- toYaml . | nindent 4 }}
