@@ -104,9 +104,19 @@ A failed Job fails the Helm install or upgrade and stays for inspection
 
 The SSH key is root-equivalent on the VM, so only the bootstrap pod mounts it. That pod has
 no Kubernetes API token. The long-running controller has API access but never sees the key.
-Because the hook runs before the controller is upgraded, the daemon is always updated first.
 To repair drift between upgrades (for example after rebuilding the VM), set
 `bootstrap.schedule` to a cron expression. A CronJob then reruns the same one-shot pod.
+
+On `helm upgrade` and `helm rollback`, an earlier `-quiesce` hook Job stops every other
+bootstrap writer before the bootstrap hook runs. That covers the drift-repair CronJob and
+its running Jobs, and also a controller from before this split (0.4.0 and earlier), which
+ran SSH bootstrap itself. The quiesce Job has namespace-scoped API access and no SSH key.
+It waits until those pods are gone, so no older payload can reinstall the daemon after the
+hook. The daemon is therefore updated before the new controller starts. The upgrade then
+restores the controller to one replica and resumes the CronJob. If the bootstrap hook
+fails, the upgrade fails and the CronJob stays suspended. A legacy controller that the
+quiesce Job scaled down also stays down until a later upgrade or `helm rollback` succeeds.
+Forwarding rules keep serving meanwhile.
 
 Bootstrap currently targets Debian/Ubuntu with apt and systemd on a trusted private HTTP API
 path (`lbNode.allowPrivateHTTP: true`). Scope the SSH key and the namespace's Secret read

@@ -33,6 +33,9 @@ Set `bootstrap.enabled`, `bootstrap.existingSecret`, `bootstrap.sshHost`,
 `private_key` and `known_hosts`; use a dedicated VM key and a trusted provisioned host key.
 A `pre-install`/`pre-upgrade` hook Job, not the controller, mounts that root-equivalent key.
 The Job has no Kubernetes API token. Set `bootstrap.schedule` to add a drift-repair CronJob.
+On upgrade and rollback a preceding quiesce hook stops that CronJob and any controller
+from 0.4.0 or earlier that bootstraps by itself, so no older payload runs after the
+bootstrap hook.
 
 With `rbac.restrictServiceWrites` (default `true`) on Kubernetes 1.30+, a
 ValidatingAdmissionPolicy limits the controller's Service updates to its own finalizer.

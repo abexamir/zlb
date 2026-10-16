@@ -25,10 +25,10 @@ class Kubernetes:
         with urlopen(request, context=self.context, timeout=15) as response:
             return json.load(response)
 
-    def list_all(self, path):
+    def list_all(self, path, **params):
         items, continuation = [], None
         while True:
-            query = {"limit": 500}
+            query = {"limit": 500, **params}
             if continuation:
                 query["continue"] = continuation
             result = self.request("GET", path + "?" + urlencode(query))

@@ -1,0 +1,126 @@
+{{- if .Values.bootstrap.enabled }}
+{{- $name := printf "%s-quiesce" (include "zlb.fullname" .) }}
+# Runs before the bootstrap hook (lower weight) on upgrade and rollback. It stops the
+# drift-repair CronJob and any pre-Job-split controller that still runs SSH bootstrap
+# itself, so no older payload can reinstall the daemon after the hook. It has scoped API
+# access and no SSH key; the bootstrap pod has the SSH key and no API access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ include "zlb.fullname" . | quote }}]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    resourceNames: [{{ include "zlb.fullname" . | quote }}]
+    verbs: [patch]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    resourceNames: [{{ printf "%s-bootstrap" (include "zlb.fullname" .) | quote }}]
+    verbs: [patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [list, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quiesce
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        {{- include "zlb.labels" . | nindent 8 }}
+        app.kubernetes.io/component: quiesce
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: quiesce
+          {{- $repository := required "image.repository is required" .Values.image.repository }}
+          image: {{ if .Values.image.digest }}{{ printf "%s@%s" $repository .Values.image.digest | quote }}{{ else }}{{ printf "%s:%s" $repository .Values.image.tag | quote }}{{ end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, zlb.quiesce]
+          args:
+            - {{ printf "--namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--deployment=%s" (include "zlb.fullname" .) | quote }}
+            - {{ printf "--cronjob=%s-bootstrap" (include "zlb.fullname" .) | quote }}
+            - {{ printf "--instance=%s" .Release.Name | quote }}
+          resources:
+            {{- toYaml .Values.bootstrap.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
