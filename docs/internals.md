@@ -1,6 +1,6 @@
 # zlb internals
 
-How zlb works, for reviewers and anyone debugging below the [operator guide](guide.md).
+How zlb works underneath the [operator guide](guide.md).
 Examples use the guide's topology plus Ready nodes `10.0.0.11` and `10.0.0.12`.
 
 - [Components and ownership](#components-and-ownership)
@@ -102,12 +102,13 @@ daemon: it replaces every listener.
 | `GET /v1/info` (token) | accepted versions, public IPs, node CIDR, forbidden ports, backend port range |
 | `GET /healthz` | `{"alive": true}`: process liveness only |
 
-Limits: body 1 byte to 2 MiB with Content-Length (no chunked encoding), 10 s per socket
-operation and 30 s per request, `--max-connections` concurrent connections, sources outside
-`--allow-from` closed before reading. The state allows 4096 listeners, 4096 backend sets of up
-to 4096 nodes, 1024 source ranges per listener, IPv4 only. The daemon rejects IPs outside its
-`--ip` list, backends outside its node CIDR or backend port range, duplicate
-`(IP, protocol, port)` listeners and forbidden ports. The controller waits 90 s.
+| Limit | Value |
+| --- | --- |
+| Body | 1 byte to 2 MiB, Content-Length required (no chunked encoding) |
+| Time | 10 s per socket operation, 30 s per request; the controller waits 90 s |
+| Connections | `--max-connections`; peers outside `--allow-from` closed before reading |
+| State | 4096 listeners, 4096 backend sets of up to 4096 nodes, 1024 source ranges per listener, IPv4 only |
+| Rejected | IPs outside `--ip`, backends outside the node CIDR or backend port range, duplicate `(IP, protocol, port)`, forbidden ports |
 
 ## Verified apply
 
@@ -179,23 +180,17 @@ chain input {
 }
 ```
 
-- **prerouting** (nat, -110, before the usual -100) looks up `IP . protocol . port` in
-  `@dispatch` and jumps to the listener's chain `l_<id>` (`<id>`: first 16 hex digits of the
-  SHA-256 of `[IP, protocol, port]`). One map lookup per packet, one chain per listener.
-- **l_\<id\>** gates on source ranges when set, counts new connections in `c_<id>` (kept
-  across applies) and picks a backend round-robin with `numgen`. Conntrack pins each flow.
-- **forward** (filter, -10) accepts established and related packets of zlb flows, drops
-  invalid packets and new non-DNAT connections from the public interface (unless
-  `--allow-foreign-forwarding`), then looks up the
-  original tuple in `@guard`: `open`, or `a_<id>` for listeners with source ranges, accepts
-  DNATed traffic to the node CIDR and drops the rest of that tuple.
-- **input** (filter, -10) uses `@guard` too, so denied or empty-backend listener traffic
-  never reaches a local socket. An empty-backend listener maps straight to `drop`.
-- `--isolate-public-ips` adds input rules that accept only replies and ping to the public
-  IPs. `--hairpin-snat-from` adds a `postrouting` nat chain (priority 100) and a `hairpin`
-  set of the listener tuples; it masquerades flows from those sources whose original
-  (IP, protocol, port) is in the set. Nothing else is SNATed, and there is no OUTPUT NAT.
-- Base chains use policy accept: unmatched traffic continues, and other tables can still drop.
+| Chain | Hook, priority | Role |
+| --- | --- | --- |
+| `prerouting` | nat, -110 (before the usual -100) | one `@dispatch` lookup of `IP . protocol . port`, jump to `l_<id>` (`<id>`: first 16 hex digits of the SHA-256 of `[IP, protocol, port]`) |
+| `l_<id>` | | source-range gate if set, count new connections in `c_<id>` (kept across applies), round-robin backend with `numgen`; conntrack pins each flow |
+| `forward` | filter, -10 | accept established zlb flows; drop invalid and new non-DNAT traffic from the public interface (unless `--allow-foreign-forwarding`); then `@guard` |
+| `open`, `a_<id>` | | `@guard` targets: accept DNATed traffic to the node CIDR, drop the rest of that tuple; empty-backend listeners map straight to `drop` |
+| `input` | filter, -10 | `@guard` again, so denied listener traffic never reaches a local socket; `--isolate-public-ips` adds accept-only-replies-and-ping rules |
+| `postrouting` | nat, 100 | only with `--hairpin-snat-from`: masquerade those sources when the original tuple is in the `hairpin` set |
+
+Base chains use policy accept, so unmatched traffic continues and other tables can still
+drop. Nothing else is SNATed, and there is no OUTPUT NAT.
 
 ## Packet path
 
@@ -325,17 +320,14 @@ There are no active health checks: Node and EndpointSlice readiness decide eligi
 
 ## Limits and non-goals
 
-- IPv4 only; one node CIDR, one controller and one daemon per state; no HA or leader election.
-- One IP per Service. No IP acquisition from providers, route discovery, ARP announcement or
-  DNS management.
-- No health probes, session affinity, weights or least-connections; conntrack gives flow
-  affinity only.
-- `sessionAffinity`, `healthCheckNodePort`, `trafficDistribution` and other load-balancer
-  annotations are ignored; `spec.loadBalancerIP` is rejected.
-- Reserved literal ports come only from administrator reservations; Services cannot request
-  arbitrary public ports.
-- No SNAT except the opt-in hairpin, no OUTPUT NAT, no conntrack flushing, no TLS
-  termination or PROXY protocol.
+| Area | Not supported |
+| --- | --- |
+| Topology | IPv6; more than one node CIDR, controller or daemon per state; HA or leader election |
+| Addresses | more than one IP per Service; provider IP acquisition, route discovery, ARP announcement, DNS |
+| Balancing | health probes, session affinity, weights, least-connections (conntrack gives flow affinity only) |
+| Service fields | `sessionAffinity`, `healthCheckNodePort`, `trafficDistribution`, other LB annotations are ignored; `spec.loadBalancerIP` is rejected |
+| Ports | arbitrary public ports; literal ports come only from administrator reservations |
+| Datapath | SNAT except the opt-in hairpin, OUTPUT NAT, conntrack flushing, TLS termination, PROXY protocol |
 
 ## Source map
 
