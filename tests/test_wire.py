@@ -1,9 +1,8 @@
-import copy
 import json
 import unittest
 
 from zlb.compiler import compile_state
-from zlb.model import canonical, compact, digest, expand, validate_state
+from zlb.model import canonical, digest, expand, validate_state
 from zlb.natd import Applier, render
 
 IP, CIDR = "198.51.100.10", "10.20.0.0/16"

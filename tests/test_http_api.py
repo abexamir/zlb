@@ -1,5 +1,5 @@
 import json
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection
 from pathlib import Path
 import shutil
 import socket
@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from zlb.controller import LoadBalancerNode
 from zlb.http_api import APIServer, make_handler, read_token, server_context

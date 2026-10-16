@@ -1,2 +1,6 @@
 # Documentation/example validation only; zlb has no third-party runtime dependencies.
 PyYAML>=6.0.2,<7
+# CI lint and coverage, pinned so every run uses the same rules.
+ruff==0.17.1
+zizmor==1.31.1
+coverage==7.10.7
