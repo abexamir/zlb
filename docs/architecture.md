@@ -45,7 +45,9 @@ CronJob) verifies the VM host key, installs required packages and the daemon, an
 its declared revision. The bootstrap pod holds the root-equivalent SSH key but no Kubernetes
 API token; the controller holds API access but no SSH key. API tokens and SSH private keys
 travel through mounted Secrets and encrypted SSH stdin, never command arguments. Only a
-verified apply makes the controller Ready.
+verified apply makes the controller Ready. Before the bootstrap hook runs on upgrade or
+rollback, a quiesce hook stops the drift-repair CronJob and any legacy controller that still
+bootstraps by itself, so an older payload cannot overwrite the new daemon.
 
 RBAC cannot restrict `patch services` to particular fields. On Kubernetes 1.30+ the chart
 installs a ValidatingAdmissionPolicy that lets the controller's ServiceAccount add or remove

@@ -33,6 +33,7 @@ jobs:
       - run: python scripts/check_docs.py
       - run: helm lint charts/zlb -f examples/helm-values.yaml
       - run: helm template zlb charts/zlb -f examples/helm-values.yaml > /tmp/zlb.yaml
+      - run: python scripts/check_chart.py
       - run: python scripts/package_chart.py --output /tmp/charts --version 0.2.0-ci.1 --image-tag sha-test
   nat:
     runs-on: ubuntu-24.04
