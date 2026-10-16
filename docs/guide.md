@@ -254,8 +254,10 @@ else the Service's current IP; else an IP reserved to it; else the lowest pool I
 reserved to another Service (IPs are shared). It never spills into another pool.
 
 Keep reserved ports outside the NodePort range. If two Services still resolve to the same
-`(IP, protocol, port)`, the reservation owner keeps it, else the older Service; the other
-fails alone with a Warning Event. Each tick the controller also asks the daemon
+`(IP, protocol, port)`, the Service whose reservation produced that literal port keeps it,
+else the older Service. A Service is published only if it keeps every listener it needs, so
+the other fails whole and alone with a Warning Event; so does a Service whose own ports
+resolve to the same listener. Each tick the controller also asks the daemon
 (`/v1/info`) what it accepts, so a Service the daemon would refuse fails alone too.
 
 ### Services

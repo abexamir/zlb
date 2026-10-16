@@ -35,8 +35,32 @@ class CollisionTests(unittest.TestCase):
                     svc("owner", 30443, 31000), svc("innocent", 5432, 31543)]
         plan = compile_state(services, NODES, [], pool, CIDR)
         self.assertEqual(sorted(plan.assignments), ["innocent", "owner"])
-        self.assertIn(f"{IP}:30443/TCP is already used by apps/owner", plan.errors["bystander"])
+        self.assertIn(f"{IP}:30443/TCP is claimed by apps/owner", plan.errors["bystander"])
         self.assertEqual(ports(plan), [30443, 31543])
+
+    def test_a_service_colliding_with_itself_fails_alone(self):
+        # Its reserved literal 31000 equals its other port's NodePort 31000.
+        pool = PoolConfig.parse({"default_pool": "p", "pools": [{"name": "p", "ips": [IP],
+                                 "reservations": [{"ip": IP, "ports": [31000], "service": "apps/self"}]}]})
+        broken = svc("self", 31000, 30001)
+        broken["spec"]["ports"].append({"port": 80, "nodePort": 31000})
+        plan = compile_state([broken, svc("innocent", 5432, 31543)], NODES, [], pool, CIDR)
+        self.assertEqual(list(plan.assignments), ["innocent"])
+        self.assertIn(f"two ports resolve to public listener {IP}:31000/TCP", plan.errors["self"])
+
+    def test_precedence_is_decided_per_listener_not_per_service(self):
+        # Older "a" owns a reservation on 31000, but its NodePort 32000 collides with the port
+        # reserved to "b". Owning some reservation must not let "a" take b's.
+        pool = PoolConfig.parse({"default_pool": "p", "pools": [{"name": "p", "ips": [IP], "reservations": [
+            {"ip": IP, "ports": [31000], "service": "apps/a"}, {"ip": IP, "ports": [32000], "service": "apps/b"}]}]})
+        a = svc("a", 31000, 30001, created="2026-01-01T00:00:00Z")
+        a["spec"]["ports"].append({"port": 80, "nodePort": 32000})
+        b = svc("b", 32000, 30002, created="2026-02-01T00:00:00Z")
+        for order in ([a, b], [b, a]):
+            plan = compile_state(order, NODES, [], pool, CIDR)
+            self.assertEqual(list(plan.assignments), ["b"])
+            self.assertIn(f"{IP}:32000/TCP is claimed by apps/b", plan.errors["a"])
+            self.assertEqual(ports(plan), [32000])
 
     def test_without_reservations_the_older_service_wins(self):
         newer, older = svc("newer", 80, 30080, "2026-02-01T00:00:00Z"), svc("older", 81, 30080, "2026-01-01T00:00:00Z")
