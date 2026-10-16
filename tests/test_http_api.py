@@ -222,6 +222,31 @@ class TLSTests(unittest.TestCase):
         self.assertGreaterEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
 
 
+class TokenRotationTests(unittest.TestCase):
+    def test_rotated_token_file_applies_without_restart(self):
+        applier = Mock()
+        applier.apply.return_value = 'digest'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'token'
+            path.write_text('a' * 32)
+            server = APIServer(('127.0.0.1', 0), make_handler(applier, lambda: read_token(path)))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), worker.join()))
+            def post(token):
+                connection = HTTPConnection(*server.server_address, timeout=3)
+                connection.request('POST', '/v1/state', body=b'{}', headers={'Authorization': 'Bearer ' + token})
+                status = connection.getresponse().status
+                connection.close()
+                return status
+            self.assertEqual(post('a' * 32), 200)
+            path.write_text('b' * 32)
+            self.assertEqual((post('a' * 32), post('b' * 32)), (401, 200))
+            path.write_text('short')
+            with self.assertLogs('zlb.http_api', level='ERROR'):
+                self.assertEqual(post('b' * 32), 503)
+
+
 class TokenTests(unittest.TestCase):
     def test_token_validation(self):
         with tempfile.TemporaryDirectory() as directory:
