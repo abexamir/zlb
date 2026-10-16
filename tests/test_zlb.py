@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from zlb.compiler import compile_state
 from zlb.controller import Controller, LoadBalancerNode
 from zlb.kube import Kubernetes
-from zlb.model import CLASS, FINALIZER, PREFIX, digest, expand, validate_state
+from zlb.model import CLASS, FINALIZER, PREFIX, PUBLISHED, digest, expand, validate_state
 from zlb.pools import PoolConfig
 
 POOL = ["198.51.100.10"]
@@ -167,6 +167,16 @@ class FakeKube:
             result["status"] = value
         return result
 
+    def annotate(self, svc, key, value):
+        self.actions.append(("annotate", {key: value}))
+        result = copy.deepcopy(svc)
+        annotations = result["metadata"].setdefault("annotations", {})
+        if value is None:
+            annotations.pop(key, None)
+        else:
+            annotations[key] = value
+        return result
+
     def warning(self, svc, message):
         self.actions.append(("warning", message))
 
@@ -183,9 +193,10 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(kube.actions, [("/metadata/finalizers", [FINALIZER])])
         lb_node.apply.side_effect = apply
         controller.reconcile()
-        self.assertEqual(kube.actions[-1][0], "/status")
-        self.assertEqual(kube.actions[-1][1]["loadBalancer"]["ingress"],
+        self.assertEqual(kube.actions[-2][0], "/status")
+        self.assertEqual(kube.actions[-2][1]["loadBalancer"]["ingress"],
                          [{"ip": POOL[0], "ipMode": "Proxy"}])
+        self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: "80:30080/TCP"}))
 
     def test_failed_push_never_publishes_or_cleans_up(self):
         svc = service(previous=POOL[0])
@@ -204,6 +215,25 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(lb_node.apply.call_args.args[0]["listeners"], [])
         self.assertEqual(kube.actions[0], ("/status", {"loadBalancer": {"ingress": []}}))
         self.assertEqual(kube.actions[1], ("/metadata/finalizers", ["other/cleanup"]))
+
+    def test_published_ports_follow_the_assignment(self):
+        svc = service("multi", node_port=30080)
+        svc["spec"]["ports"].append({"port": 53, "protocol": "UDP", "nodePort": 30053})
+        svc["metadata"]["finalizers"] = [FINALIZER]
+        svc["metadata"]["annotations"] = {PUBLISHED: "80:30080/TCP,53:30053/UDP"}
+        svc["status"] = {"loadBalancer": {"ingress": [{"ip": POOL[0], "ipMode": "Proxy"}]}}
+        controller, kube, lb_node = self.controller([svc])
+        controller.reconcile()
+        self.assertEqual(kube.actions, [], "an unchanged mapping is not rewritten")
+        bad = copy.deepcopy(svc)
+        bad["spec"]["loadBalancerIP"] = POOL[0]
+        controller, kube, lb_node = self.controller([bad])
+        controller.reconcile()
+        self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: None}), "a rejected Service loses it")
+        bad["metadata"]["deletionTimestamp"] = "now"
+        controller, kube, lb_node = self.controller([bad])
+        controller.reconcile()
+        self.assertNotIn("annotate", [action for action, _ in kube.actions], "a deleted Service is not touched")
 
     def test_api_read_failure_does_not_push(self):
         controller, kube, lb_node = self.controller([service()])

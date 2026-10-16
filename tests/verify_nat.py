@@ -117,6 +117,10 @@ def main():
         ns("zlb-gw", "ip", "link", "add", "zlb-br", "type", "bridge")
         ns("zlb-gw", "ip", "addr", "add", "10.20.0.1/20", "dev", "zlb-br")
         ns("zlb-gw", "ip", "link", "set", "zlb-br", "up")
+        # The bridge stands in for the node network's switch. With br_netfilter (loaded on most
+        # Docker hosts) bridged node-to-node packets would also pass the load balancer node's
+        # conntrack, which a real switch never does; that would hide hairpin failures.
+        ns("zlb-gw", "sh", "-c", "f=/proc/sys/net/bridge/bridge-nf-call-iptables; [ ! -e $f ] || echo 0 > $f")
         for index in (1, 2):
             name, bridge_end, node_end = f"zlb-n{index}", f"zlb-b{index}", f"zlb-e{index}"
             command("ip", "link", "add", bridge_end, "type", "veth", "peer", "name", node_end)
@@ -206,6 +210,22 @@ def main():
         assert request().split()[1] == CLIENT
         a.apply(state)
         print("PASS: optional isolation hides load balancer node-local services on public IPs", flush=True)
+        def from_node(proto):
+            return ns("zlb-n2", "python3", "-c", CLIENT_CODE, proto, "", input="ping\n").strip()
+        for proto in ("TCP", "UDP"):
+            for _ in range(2):
+                try: result = from_node(proto)
+                except RuntimeError: continue
+                raise AssertionError("hairpin worked without SNAT: " + result)
+        hairpin = NamespaceApplier([PUBLIC], CIDR, "zlb-wan", temporary.name, hairpin=["10.20.0.0/24"])
+        hairpin.apply(state)
+        for proto in ("TCP", "UDP"):
+            responses = [from_node(proto) for _ in range(4)]
+            assert {x.split()[0] for x in responses} == {"10.20.0.11", "10.20.0.12"}, (proto, responses)
+            assert all(x.split()[1] == "10.20.0.1" for x in responses), (proto, responses)
+            assert request(proto).split()[1] == CLIENT
+        a.apply(state)
+        print("PASS: optional hairpin SNAT lets nodes reach a public IP; outside clients keep their source", flush=True)
         held = subprocess.Popen(["ip", "netns", "exec", "zlb-client", "python3", "-c", CLIENT_CODE, "TCP"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(held)

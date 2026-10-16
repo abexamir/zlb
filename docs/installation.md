@@ -189,7 +189,25 @@ trusted private network.
 DNAT retains client IPs. Replies must traverse the load-balancer VM before leaving the site.
 A separate egress router therefore needs appropriate return routing; routing this traffic
 straight to the internet bypasses reverse NAT. Configure this in infrastructure before cutover.
-Same-subnet hairpin and load balancer node-originated public-IP traffic require separate routing design.
+Load balancer node-originated public-IP traffic is not forwarded; test from another host.
+
+### In-cluster clients (hairpin)
+
+A Pod or node calling a public IP reaches the load balancer node with a source address
+inside the cluster, usually its node's address after CNI SNAT. The chosen backend node then
+replies straight to that address, not through the load balancer node, and the client drops a
+reply that does not come from the public IP it called. Pass `--hairpin-snat-from` with those
+source CIDRs (`bootstrap.hairpinSnatFrom`, typically your node CIDR, plus the Pod CIDR if
+your CNI does not SNAT Pod egress) to masquerade such connections as the load balancer
+node's address on the node network:
+
+```sh
+python3 -m zlb.natd ... --hairpin-snat-from 10.0.0.0/24
+```
+
+Only zlb-DNATed connections from those sources are masqueraded, so external clients keep
+their address. The workload sees the load balancer node instead of the in-cluster client,
+and `loadBalancerSourceRanges` still applies to the original source.
 
 TCP, UDP and SCTP may share numeric ports. The load balancer node kernel needs conntrack/NAT support for
 each protocol; Kubernetes and its service datapath must support the corresponding NodePort

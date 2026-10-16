@@ -6,6 +6,8 @@ import json
 CLASS = "zlb.zarrino.tech/gateway"
 PREFIX = "zlb.zarrino.tech/"
 FINALIZER = PREFIX + "cleanup"
+# Written by the controller: each Service port with the port it is reachable on externally.
+PUBLISHED = PREFIX + "published-ports"
 PROTOCOLS = {"TCP", "UDP", "SCTP"}
 VERSION = 3          # wire version the controller sends
 VERSIONS = (2, 3)    # wire versions the daemon accepts
