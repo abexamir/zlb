@@ -4,9 +4,11 @@ For the full illustrated walkthrough and command trace, see [installation and pa
 
 ## Components
 
-The controller runs inside Kubernetes using a ServiceAccount. Every polling tick reads a
-complete, paginated list of Services, Nodes and EndpointSlices, compiles the desired listeners,
-and posts the entire state to the load balancer node. It needs no cloud API or external IP-rental service.
+The controller runs inside Kubernetes using a ServiceAccount. It keeps watch-backed caches of
+Services, Nodes and EndpointSlices that store only the fields it needs. Every tick reads
+those caches (no API reads), compiles the desired listeners, and posts the entire state to
+the load balancer node. A tick does nothing unless every cache reflects a complete list and
+an unbroken watch. It needs no cloud API or external IP-rental service.
 
 The Linux load balancer node runs `zlb-natd`. The daemon authenticates the request, validates a separate
 address/backend allowlist, and assigns configured interface addresses and renders native nftables DNAT/filter rules. It does not listen
