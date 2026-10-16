@@ -243,8 +243,16 @@ def main():
             assert {x.split()[0] for x in responses} == {"10.20.0.11", "10.20.0.12"}, (proto, responses)
             assert all(x.split()[1] == "10.20.0.1" for x in responses), (proto, responses)
             assert request(proto).split()[1] == CLIENT
+        # DNAT the operator configured on another port of the same public IP is not zlb's to
+        # masquerade, so the backend must never see the load balancer node as the peer.
+        ns("zlb-gw", "nft", "-f", "-", input="table ip foreign_probe { chain pre { type nat hook prerouting "
+           f"priority -100; policy accept; ip daddr {PUBLIC} tcp dport 81 dnat to 10.20.0.11:30080; }}; }}\n")
+        try: foreign = ns("zlb-n2", "python3", "-c", CLIENT_CODE, "TCP", "", PUBLIC, "81", input="ping\n").strip()
+        except RuntimeError: foreign = None
+        ns("zlb-gw", "nft", "delete", "table", "ip", "foreign_probe")
+        assert foreign is None or foreign.split()[1] != "10.20.0.1", "foreign DNAT was masqueraded: " + foreign
         a.apply(state)
-        print("PASS: optional hairpin SNAT lets nodes reach a public IP; outside clients keep their source", flush=True)
+        print("PASS: optional hairpin SNAT lets nodes reach a public IP; outside clients and foreign DNAT keep their source", flush=True)
         held = subprocess.Popen(["ip", "netns", "exec", "zlb-client", "python3", "-c", CLIENT_CODE, "TCP"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(held)
