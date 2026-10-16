@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
-from zlb.model import VERSION, digest, validate_state
+from zlb.model import NODE_PORTS, VERSION, digest, port_range, validate_state
 from zlb.natd import Applier, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
@@ -52,6 +52,25 @@ class ProtocolTests(unittest.TestCase):
             state["listeners"][0].update(change)
             with self.assertRaises((ValueError, TypeError)):
                 validate_state(state, [IP], CIDR)
+
+    def test_backend_ports_limited_to_node_port_range(self):
+        # A stolen token must not be able to publish the kubelet, etcd or SSH of a node.
+        for number in (22, 2379, 10250, 29999, 32768):
+            state = copy.deepcopy(STATE)
+            state["listeners"][0]["backends"][0]["port"] = number
+            with self.subTest(port=number), self.assertRaisesRegex(ValueError, "NodePort range"):
+                validate_state(state, [IP], CIDR, backend_ports=NODE_PORTS)
+        for number in NODE_PORTS:
+            state = copy.deepcopy(STATE)
+            state["listeners"][0]["backends"][0]["port"] = number
+            validate_state(state, [IP], CIDR, backend_ports=NODE_PORTS)
+
+    def test_port_range_parsing(self):
+        self.assertEqual(port_range("30000-32767"), (30000, 32767))
+        self.assertEqual(port_range("8080-8080"), (8080, 8080))
+        for value in ("32767-30000", "0-10", "1-65536", "30000", "a-b", "1-2-3"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                port_range(value)
 
     def test_source_ranges_and_empty_backend_filter_guard(self):
         state = copy.deepcopy(STATE)
@@ -184,6 +203,18 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(self.a.install.call_count, 2)
         self.a.addresses.add.assert_called_once()
         self.a.addresses.retire.assert_called_once()
+
+    def test_daemon_enforces_node_port_range_by_default(self):
+        state = copy.deepcopy(STATE)
+        state["listeners"][0]["backends"][0]["port"] = 10250
+        with self.assertRaisesRegex(ValueError, "NodePort range"):
+            self.a.apply(state)
+        self.a.install.assert_not_called()
+        custom = Applier([IP], CIDR, "wan0", self.directory.name, backend_ports=(10000, 10999))
+        custom.addresses, custom.install, custom.verify = Mock(owned=set()), Mock(), Mock()
+        custom.snapshot = Mock(side_effect=[None, self.actual])
+        state["listeners"][0]["backends"][0]["port"] = 10250
+        self.assertEqual(custom.apply(state), digest(state))
 
     def test_dry_run_failure_never_changes_addresses(self):
         self.a.install.side_effect = RuntimeError("check failure")
