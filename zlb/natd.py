@@ -11,7 +11,7 @@ import threading
 
 from .addresses import Addresses
 from .http_api import APIServer, make_handler, read_token, server_context
-from .model import NODE_PORTS, VERSION, digest, port_range, validate_state
+from .model import NODE_PORTS, VERSION, VERSIONS, digest, expand, port_range, validate_state
 
 LOG = logging.getLogger(__name__)
 
@@ -46,6 +46,11 @@ def host_guards(public_interface, ips, isolate=False):
 KEY = "ipv4_addr . inet_proto . inet_service"
 
 
+def marker(state):
+    """Ownership and revision marker stored as the table comment."""
+    return f"zlb:v{state['version']}:{digest(state)}"
+
+
 def listener_id(listener):
     return digest([listener["ip"], listener["protocol"].lower(), listener["port"]])[:16]
 
@@ -60,13 +65,14 @@ def layout(state, ips, public_interface=None, isolate=False):
     chains = {"prerouting": 1, "forward": bool(ips) + len(forward_guard) + 1,
               "input": 1 + len(input_guard), "open": 2}
     counters = set()
-    for listener in state["listeners"]:
+    listeners = expand(state)
+    for listener in listeners:
         if listener["backends"]:
             chains["l_" + listener_id(listener)] = 1
             counters.add("c_" + listener_id(listener))
             if listener["source_ranges"]:
                 chains["a_" + listener_id(listener)] = 2
-    maps = {"dispatch": sum(bool(x["backends"]) for x in state["listeners"]), "guard": len(state["listeners"])}
+    maps = {"dispatch": sum(bool(x["backends"]) for x in listeners), "guard": len(listeners)}
     return chains, maps, counters
 
 
@@ -81,7 +87,7 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
     ips = sorted(allowed_ips if allowed_ips is not None else {x["ip"] for x in state["listeners"]})
     revision = digest(state)
     dispatch, guard, objects = [], [], []
-    for listener in state["listeners"]:
+    for listener in expand(state):
         proto, lid = listener["protocol"].lower(), listener_id(listener)
         key = f"{listener['ip']} . {proto} . {listener['port']}"
         backends = listener["backends"]
@@ -116,7 +122,7 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
     original = "ct direction original ct original ip daddr . ct original protocol . ct original proto-dst vmap @guard"
     established = ([f"ct state established,related ct status dnat ct original ip daddr {{ {', '.join(ips)} }} "
                     f"ct reply ip saddr {node_cidr} counter accept"] if ips else [])
-    return (f'table ip {table} {{\ncomment "zlb:v{VERSION}:{revision}";\n'
+    return (f'table ip {table} {{\ncomment "{marker(state)}";\n'
             + verdict_map("dispatch", dispatch) + verdict_map("guard", guard)
             + "".join(item + "\n" for item in objects)
             # A DNATed listener flow must target the node CIDR; anything else for a listener
@@ -167,7 +173,7 @@ class Applier:
             return None
         data = json.loads(self.command("nft", "-j", "-s", "list", "table", "ip", self.table))
         info = next(x["table"] for x in data["nftables"] if "table" in x)
-        if not info.get("comment", "").startswith(f"zlb:v{VERSION}:"):
+        if not any(info.get("comment", "").startswith(f"zlb:v{version}:") for version in VERSIONS):
             raise RuntimeError("refusing to modify a table not owned by this zlb schema")
         return {"fingerprint": digest(stable(data)), "data": data, "comment": info["comment"]}
 
@@ -188,7 +194,7 @@ class Applier:
         self.command(*args, input=self.batch(text, previous))
 
     def verify(self, state, actual):
-        if actual is None or actual["comment"] != f"zlb:v{VERSION}:{digest(state)}":
+        if actual is None or actual["comment"] != marker(state):
             raise RuntimeError("nftables did not acknowledge the expected revision")
         chains, rules, maps, counters = {}, {}, {}, set()
         for item in actual["data"]["nftables"]:
@@ -222,7 +228,7 @@ class Applier:
         # Keep an acknowledged table until a new snapshot arrives after a daemon restart.
         # New instances install an empty table and claim the configured interface addresses.
         if self.snapshot() is None:
-            self.apply({"version": VERSION, "listeners": []})
+            self.apply({"version": VERSION, "backend_sets": [], "listeners": []})
 
     def apply(self, state):
         state = validate_state(state, self.allowed_ips, self.node_cidr, self.forbidden_ports,
