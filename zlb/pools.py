@@ -1,5 +1,6 @@
 """Administrator-owned IP pools and listener reservations, independent of live Services."""
 from dataclasses import dataclass
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -79,7 +80,7 @@ class PoolConfig:
 
     @property
     def ips(self):
-        return sorted(ip for pool in self.pools.values() for ip in pool.ips)
+        return sorted((ip for pool in self.pools.values() for ip in pool.ips), key=ipaddress.IPv4Address)
 
     @classmethod
     def from_file(cls, path):
@@ -105,7 +106,8 @@ class PoolConfig:
                 raise ValueError("duplicate pool name")
             if not isinstance(raw["ips"], list) or not raw["ips"]:
                 raise ValueError("pool must contain an explicit non-empty IP list")
-            ips = tuple(sorted(ipv4(ip) for ip in raw["ips"]))
+            # Numeric order, so 198.51.100.9 is offered before 198.51.100.10.
+            ips = tuple(sorted((ipv4(ip) for ip in raw["ips"]), key=ipaddress.IPv4Address))
             if len(set(ips)) != len(ips) or all_ips.intersection(ips):
                 raise ValueError("public IPs must not overlap within or across pools")
             all_ips.update(ips)

@@ -40,7 +40,8 @@ from 0.4.0 or earlier that bootstraps by itself, so no older payload runs after 
 bootstrap hook.
 
 With `rbac.restrictServiceWrites` (default `true`) on Kubernetes 1.30+, a
-ValidatingAdmissionPolicy limits the controller's Service updates to its own finalizer.
+ValidatingAdmissionPolicy limits the controller's Service updates to its own finalizer and
+its `zlb.zarrino.tech/published-ports` annotation.
 
 Chart 0.2.0 / application 0.4.0 names the public-facing forwarding machine the
 **load balancer node**. Update the former `gateway` values block to `lbNode` and

@@ -90,6 +90,11 @@ class BootstrapTests(unittest.TestCase):
         text=unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',allow_foreign_forwarding=True,isolate_public=True)
         self.assertIn('--allow-foreign-forwarding',text)
         self.assertIn('--isolate-public-ips',text)
+        self.assertNotIn('--hairpin-snat-from',text)
+        text=unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',hairpin=['10.0.0.0/24'])
+        self.assertIn('--hairpin-snat-from 10.0.0.0/24',text)
+        with self.assertRaises(ValueError):
+            unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',hairpin=['10.0.0.1/24'])
 
     def test_cleanup_and_daemon_use_same_allowlist(self):
         text=self.bootstrap.unit

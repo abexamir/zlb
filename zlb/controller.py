@@ -14,7 +14,7 @@ from .cache import Cache
 from .http_api import read_token
 from .compiler import active, compile_state
 from .kube import Kubernetes
-from .model import FINALIZER, canonical, digest
+from .model import FINALIZER, PUBLISHED, canonical, digest
 from .pools import PoolConfig
 
 LOG = logging.getLogger(__name__)
@@ -84,12 +84,17 @@ class Controller:
         return (self.kube.list_all("/api/v1/services"), self.kube.list_all("/api/v1/nodes"),
                 self.kube.list_all("/apis/discovery.k8s.io/v1/endpointslices"))
 
-    def patch(self, svc, field, value, status=False):
-        result = self.kube.patch(svc, field, value, status=status)
+    def written(self, result):
         if self.cache:
             # Write through so the next tick does not act on the pre-patch object.
             self.cache.observe_service(result)
         return result
+
+    def patch(self, svc, field, value, status=False):
+        return self.written(self.kube.patch(svc, field, value, status=status))
+
+    def annotate(self, svc, key, value):
+        return self.written(self.kube.annotate(svc, key, value))
 
     def constraints(self):
         """The daemon's acceptance rules, checked against this controller's configuration."""
@@ -151,6 +156,13 @@ class Controller:
                 status = dict(svc.get("status", {}))
                 status["loadBalancer"] = {"ingress": ingress}
                 svc = attempt(svc, "publishing status", lambda: self.patch(svc, "/status", status, status=True))
+                if svc is None:
+                    continue
+            published = plan.published.get(uid)
+            meta = svc["metadata"]
+            if (meta.get("annotations", {}).get(PUBLISHED) != published
+                    and not (published is None and meta.get("deletionTimestamp"))):
+                svc = attempt(svc, "recording published ports", lambda: self.annotate(svc, PUBLISHED, published))
                 if svc is None:
                     continue
             if not active(svc):

@@ -125,8 +125,9 @@ can still lead to node-side SNAT. Use Local policy and inspect the workload's ob
 when source preservation is required.
 
 Replies must traverse the same load balancer node for reverse translation. A node's ability to reach
-the load balancer node does not establish this property for every client network. Same-subnet hairpin
-clients can receive direct replies that bypass it; no general hairpin solution is implemented.
+the load balancer node does not establish this property for every client network. Clients inside
+the node network get direct replies that bypass it unless their connections are masqueraded
+with the opt-in `--hairpin-snat-from`; see [in-cluster clients](installation.md#in-cluster-clients-hairpin).
 Load balancer node-originated public-IP requests do not traverse PREROUTING because there is no OUTPUT
 DNAT hook. Use a separate client for external reachability tests.
 

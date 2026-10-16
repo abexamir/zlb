@@ -56,7 +56,17 @@ def listener_id(listener):
     return digest([listener["ip"], listener["protocol"].lower(), listener["port"]])[:16]
 
 
-def layout(state, ips, public_interface=None, isolate=False):
+def hairpin_rule(sources, node_cidr):
+    """Masquerade listener connections from `sources` (cluster nodes or Pods reaching a public
+    IP) as the load balancer node, so the backend node replies through it rather than straight
+    to the client, which would drop a reply that does not come from the public IP it called.
+    Only DNATed flows whose original (IP, protocol, port) is a zlb listener in @hairpin match:
+    other clients keep their source address, and DNAT the operator configured is untouched."""
+    return (f"ip saddr {{ {', '.join(sources)} }} ip daddr {node_cidr} ct status dnat "
+            "ct original ip daddr . ct original protocol . ct original proto-dst @hairpin counter masquerade")
+
+
+def layout(state, ips, public_interface=None, isolate=False, hairpin=()):
     """The owned table's expected shape: rules per chain, elements per map, counter names.
 
     Lookups go through verdict maps keyed by (IP, protocol, port), so the work per packet is
@@ -65,6 +75,8 @@ def layout(state, ips, public_interface=None, isolate=False):
     forward_guard, input_guard = host_guards(public_interface, ips, isolate)
     chains = {"prerouting": 1, "forward": bool(ips) + len(forward_guard) + 1,
               "input": 1 + len(input_guard), "open": 2}
+    if hairpin and ips:
+        chains["postrouting"] = 1
     counters = set()
     listeners = expand(state)
     for listener in listeners:
@@ -74,18 +86,21 @@ def layout(state, ips, public_interface=None, isolate=False):
             if listener["source_ranges"]:
                 chains["a_" + listener_id(listener)] = 2
     maps = {"dispatch": sum(bool(x["backends"]) for x in listeners), "guard": len(listeners)}
+    if hairpin and ips:
+        maps["hairpin"] = maps["dispatch"]  # a set of the listener tuples DNATed by zlb
     return chains, maps, counters
 
 
 def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=None, isolate=False,
-           counters=None):
+           counters=None, hairpin=()):
     """A complete owned table, committed atomically across NAT and filtering hooks.
 
     `counters` maps counter names to (packets, bytes) carried over from the table being
     replaced, so per-listener statistics survive applies."""
     table_name(table)
     node_cidr = str(ipaddress.IPv4Network(node_cidr))
-    ips = sorted(allowed_ips if allowed_ips is not None else {x["ip"] for x in state["listeners"]})
+    ips = sorted(allowed_ips if allowed_ips is not None else {x["ip"] for x in state["listeners"]},
+                 key=ipaddress.IPv4Address)
     revision = digest(state)
     dispatch, guard, objects = [], [], []
     for listener in expand(state):
@@ -125,6 +140,9 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
                     f"ct reply ip saddr {node_cidr} counter accept"] if ips else [])
     return (f'table ip {table} {{\ncomment "{marker(state)}";\n'
             + verdict_map("dispatch", dispatch) + verdict_map("guard", guard)
+            + (f"set hairpin {{\n    type {KEY}\n"
+               + (f"    elements = {{ {', '.join(x.split(' : ')[0] for x in dispatch)} }}\n" if dispatch else "")
+               + "}\n" if hairpin and ips else "")
             + "".join(item + "\n" for item in objects)
             # A DNATed listener flow must target the node CIDR; anything else for a listener
             # tuple (denied source, empty backends) is dropped before a local socket sees it.
@@ -134,6 +152,8 @@ def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=Non
             + chain("forward", "type filter hook forward priority -10; policy accept;",
                     established + forward_guard + [original])
             + chain("input", "type filter hook input priority -10; policy accept;", [original] + input_guard)
+            + (chain("postrouting", "type nat hook postrouting priority 100; policy accept;",
+                     [hairpin_rule(hairpin, node_cidr)]) if hairpin and ips else "")
             + "}\n")
 
 
@@ -165,15 +185,16 @@ def stable(value):
 class Applier:
     def __init__(self, allowed_ips, node_cidr, interface, state_dir="/var/lib/zlb",
                  forbidden_ports=(), table="zlb", backend_ports=NODE_PORTS, guard_forwarding=True,
-                 isolate_public=False):
+                 isolate_public=False, hairpin=()):
         self.table = table_name(table)
         self.node_cidr = str(ipaddress.IPv4Network(node_cidr))
         self.forbidden_ports = forbidden_ports
         self.backend_ports = backend_ports
         self.addresses = Addresses(self.command, interface, allowed_ips, Path(state_dir) / f"{table}-addresses.json")
-        self.allowed_ips = sorted(self.addresses.desired)
+        self.allowed_ips = sorted(self.addresses.desired, key=ipaddress.IPv4Address)
         self.guard_interface = interface if guard_forwarding else None
         self.isolate_public = isolate_public
+        self.hairpin = sorted({str(ipaddress.IPv4Network(x)) for x in hairpin}, key=ipaddress.IPv4Network)
         if not self.allowed_ips:
             raise ValueError("public IP allowlist cannot be empty")
         self.lock = threading.Lock()
@@ -219,22 +240,24 @@ class Applier:
                 chains[item["chain"]["name"]] = item["chain"]
             elif "rule" in item:
                 rules[item["rule"]["chain"]] = rules.get(item["rule"]["chain"], 0) + 1
-            elif "map" in item:
-                maps[item["map"]["name"]] = len(item["map"].get("elem", []))
+            elif "map" in item or "set" in item:
+                kind = "map" if "map" in item else "set"
+                maps[item[kind]["name"]] = len(item[kind].get("elem", []))
             elif "counter" in item:
                 counters.add(item["counter"]["name"])
         expected_chains, expected_maps, expected_counters = layout(
-            state, self.allowed_ips, self.guard_interface, self.isolate_public)
+            state, self.allowed_ips, self.guard_interface, self.isolate_public, self.hairpin)
         if set(chains) != set(expected_chains):
             raise RuntimeError("nftables chain readback differs from desired state")
         if any(rules.get(name, 0) != count for name, count in expected_chains.items()):
             raise RuntimeError("nftables rule count differs from desired state")
         if maps != expected_maps or counters != expected_counters:
             raise RuntimeError("nftables map or counter readback differs from desired state")
-        for name in ("prerouting", "forward", "input"):
-            chain = chains[name]
-            if (chain.get("hook") != name or chain.get("prio") != (-110 if name == "prerouting" else -10)
-                    or chain.get("type") != ("nat" if name == "prerouting" else "filter")):
+        hooks = {"prerouting": ("nat", -110), "forward": ("filter", -10), "input": ("filter", -10),
+                 "postrouting": ("nat", 100)}
+        for name, (kind, priority) in hooks.items():
+            chain = chains.get(name)
+            if chain and (chain.get("hook") != name or chain.get("prio") != priority or chain.get("type") != kind):
                 raise RuntimeError("nftables hook readback differs from desired state")
 
     def initialize(self):
@@ -265,7 +288,7 @@ class Applier:
                     raise
                 return revision
             candidate = render(state, self.node_cidr, self.table, self.allowed_ips, self.guard_interface,
-                               self.isolate_public, self.counters() if previous else None)
+                               self.isolate_public, self.counters() if previous else None, self.hairpin)
             # Validation happens before either interface or firewall changes.
             self.install(candidate, previous, check=True)
             rollback = self.text() if previous else None
@@ -336,6 +359,9 @@ def main():
                              "were not DNATed (only if this VM also routes other public traffic)")
     parser.add_argument("--isolate-public-ips", action="store_true",
                         help="Drop traffic to the public IPs that is not a listener, a reply or ping")
+    parser.add_argument("--hairpin-snat-from", action="append", default=[], type=ipaddress.IPv4Network,
+                        help="Masquerade listener connections from this CIDR (repeatable), e.g. the "
+                             "node CIDR, so in-cluster clients can reach the public IPs")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
     if not args.cleanup and not args.token_file:
@@ -349,7 +375,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
                       args.reserved_port + [args.port], args.table, args.backend_port_range,
-                      not args.allow_foreign_forwarding, args.isolate_public_ips)
+                      not args.allow_foreign_forwarding, args.isolate_public_ips, args.hairpin_snat_from)
     token = None
     if not args.cleanup:
         read_token(args.token_file)  # fail fast on a missing or invalid token

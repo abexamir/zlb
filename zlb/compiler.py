@@ -1,6 +1,6 @@
 """Pure, deterministic Service + Node + EndpointSlice -> load balancer node state compiler."""
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .model import CLASS, PREFIX, PROTOCOLS, compact, port, validate_state
 from .pools import PoolConfig, contains
@@ -11,6 +11,7 @@ class Plan:
     state: dict
     assignments: dict  # UID -> IP; only successful Services
     errors: dict       # UID -> visible warning
+    published: dict = field(default_factory=dict)  # UID -> "port:published/PROTOCOL,..."
 
 
 def owned(service):
@@ -36,9 +37,9 @@ def node_addresses(nodes, node_cidr):
         if not any(c["type"] == "Ready" and c["status"] == "True"
                    for c in node.get("status", {}).get("conditions", [])):
             continue
-        addresses = sorted(a["address"] for a in node.get("status", {}).get("addresses", [])
-                           if a["type"] == "InternalIP"
-                           and ipaddress.ip_address(a["address"]) in network)
+        addresses = sorted((a["address"] for a in node.get("status", {}).get("addresses", [])
+                            if a["type"] == "InternalIP"
+                            and ipaddress.ip_address(a["address"]) in network), key=ipaddress.IPv4Address)
         if addresses:
             result[metadata["name"]] = addresses[0]
     return result
@@ -133,18 +134,18 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
             # Per listener: the reservation owner of that literal port first, then the older
             # Service, then by name.
             ranks = [(0 if owned else 1, meta.get("creationTimestamp", ""), identity) for owned in literal]
-            claims.append((uid, ip, own, dict(zip(keys, ranks, strict=True))))
+            claims.append((uid, ip, own, dict(zip(keys, ranks, strict=True)), [p["port"] for p in ports]))
         except (ValueError, TypeError, KeyError) as exc:
             errors[uid] = str(exc)
     # Two Services can resolve to the same public (IP, protocol, port), e.g. a literal
     # reservation equal to another Service's NodePort. Each such listener goes to its best
     # claimant, and a Service is published only if it wins every listener it needs; otherwise
     # it fails alone, whole.
-    best = {}
-    for _, _, _, ranked in claims:
+    best, published = {}, {}
+    for _, _, _, ranked, _ in claims:
         for key, rank in ranked.items():
             best[key] = min(best.get(key, rank), rank)
-    for uid, ip, own, ranked in claims:
+    for uid, ip, own, ranked, service_ports in claims:
         lost = next((key for key, rank in ranked.items() if best[key] != rank), None)
         if lost:
             errors[uid] = (f"public listener {lost[0]}:{lost[2]}/{lost[1]} is claimed by {best[lost][2]}, "
@@ -152,5 +153,8 @@ def compile_state(services, nodes, slices, pool, node_cidr, constraints=None):
             continue
         assignments[uid] = ip
         listeners.extend(own)
+        # Unreserved ports are published on their NodePort, not the Service port, so record
+        # the mapping on the Service in the style of kubectl's PORT(S) column.
+        published[uid] = ",".join(f"{number}:{x['port']}/{x['protocol']}" for number, x in zip(service_ports, own))
     return Plan(validate_state(compact(listeners), config.ips, node_cidr),
-                assignments, errors)
+                assignments, errors, published)

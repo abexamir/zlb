@@ -50,8 +50,8 @@ listener until the owning Service requests that port. Other Services can still u
 own NodePorts on that IP. A whole-IP reservation excludes every other Service entirely.
 
 An explicitly requested IP wins if eligible. Otherwise, an existing eligible status IP is
-kept; absent one, an IP with a reservation for that Service is preferred, then another
-available pool IP. Selection does not spill into another named pool.
+kept; absent one, an IP with a reservation for that Service is preferred, then the lowest
+available pool IP in numeric order. Selection does not spill into another named pool.
 
 Keep reserved literal ports outside your Kubernetes NodePort range. Kubernetes makes ordinary
 NodePorts unique, but cannot prevent an administrator reserving the same numeric port for
@@ -93,6 +93,12 @@ spec:
 If Kubernetes assigns NodePort 31543, this is published at `external-IP:31543`, even though
 its Service port is 5432. TargetPort resolution and Pod forwarding belong to Kubernetes.
 zlb always sends to `node-IP:nodePort`.
+
+Once the load balancer node accepts a Service, the controller writes the published ports to
+its `zlb.zarrino.tech/published-ports` annotation as `port:published/PROTOCOL` entries,
+comma-separated in Service port order, here `5432:31543/TCP`. A reserved literal port
+appears as, for example, `443:443/TCP`. The annotation is removed when the Service is
+rejected or stops being a zlb LoadBalancer. It is output only; do not set it yourself.
 
 The optional annotations are:
 
@@ -159,6 +165,9 @@ Run `python3 -m zlb.natd --help` for the CLI.
   connections from the public interface that were not DNATed. `--isolate-public-ips` drops
   traffic to the public IPs other than listeners, replies and ping. See
   [host protection](installation.md#load-balancer-node-host-protection).
+- `--hairpin-snat-from` (repeatable CIDR) masquerades listener connections from those
+  sources, so Pods and nodes can reach the public IPs. See
+  [in-cluster clients](installation.md#in-cluster-clients-hairpin).
 - `--table` defaults to `zlb`, with 1–32 lowercase letters/digits/underscores starting with
   a letter. The daemon refuses to overwrite a table without its schema ownership marker.
 - `--cleanup` removes the owned table and journal-owned addresses without a token. Stop

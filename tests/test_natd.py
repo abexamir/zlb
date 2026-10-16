@@ -117,6 +117,26 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(list(map(len, host_guards("wan0", [IP], True))), [2, 3])
         self.assertEqual(list(map(len, host_guards(None, [IP]))), [0, 0])
 
+    def test_optional_hairpin_masquerade_matches_only_zlb_flows(self):
+        self.assertNotIn("postrouting", render(STATE, CIDR, allowed_ips=[IP]))
+        self.assertNotIn("postrouting", layout(STATE, [IP])[0])
+        text = render(STATE, CIDR, allowed_ips=["198.51.100.11", IP], hairpin=["10.0.0.0/24", "10.244.0.0/16"])
+        postrouting = text.split("chain postrouting")[1]
+        self.assertIn("type nat hook postrouting priority 100; policy accept;", postrouting)
+        self.assertIn(f"ip saddr {{ 10.0.0.0/24, 10.244.0.0/16 }} ip daddr {CIDR} ct status dnat "
+                      "ct original ip daddr . ct original protocol . ct original proto-dst @hairpin "
+                      "counter masquerade", postrouting)
+        # Only zlb's own listener tuples, not every DNAT to a configured public IP.
+        dispatch = text.split("map dispatch")[1].split("elements = { ")[1].split(" }")[0]
+        members = text.split("set hairpin")[1].split("elements = { ")[1].split(" }")[0]
+        self.assertEqual(members.split(", "), [x.split(" : ")[0] for x in dispatch.split(", ")])
+        chains, maps, _ = layout(STATE, [IP], hairpin=["10.0.0.0/24"])
+        self.assertEqual((chains["postrouting"], maps["hairpin"]), (1, maps["dispatch"]))
+
+    def test_ips_render_in_numeric_order(self):
+        text = render(STATE, CIDR, allowed_ips=["198.51.100.10", "198.51.100.9"], isolate=True)
+        self.assertIn("ip daddr { 198.51.100.9, 198.51.100.10 }", text)
+
     def test_only_owned_table_and_numeric_generators(self):
         text = render(STATE, CIDR)
         self.assertIn("table ip zlb", text)
