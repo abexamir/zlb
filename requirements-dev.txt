@@ -1,0 +1,2 @@
+# Documentation/example validation only; zlb has no third-party runtime dependencies.
+PyYAML>=6.0.2,<7
