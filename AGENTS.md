@@ -24,12 +24,13 @@ explicit VM; infrastructure owns VM creation, trusted host keys, routing and fir
 
 ## Current implementation
 
-Python 3.11+ with the standard library. The controller polls Services, Nodes and discovery/v1
-EndpointSlices every five seconds with jitter. Read all paginated resources successfully
-before pushing a full snapshot, and treat null endpoint lists as empty.
+Python 3.11+ with the standard library. The controller keeps list+watch caches of trimmed
+Services, Nodes and discovery/v1 EndpointSlices and reconciles from them every five seconds
+with jitter. Only push a full snapshot while every cache reflects a complete, successful
+list and an unbroken watch, and treat null endpoint lists as empty.
 
 The load balancer node uses native nftables for IPv4 TCP, UDP and SCTP in one owned `table ip zlb`.
-One controller posts full schema-v2 desired state to one load balancer node. Ordinary ports publish
+One controller posts full desired state (wire schema v3; the daemon also accepts v2) to one load balancer node. Ordinary ports publish
 NodePorts; administrator reservations publish literal Service ports or dedicate an IP.
 Unclassified LoadBalancer Services are adopted. Listener identity includes protocol.
 The load balancer node assigns configured IPs to an explicit public interface. Its persistent address

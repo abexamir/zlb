@@ -8,6 +8,7 @@ import ssl
 import time
 from urllib.request import Request, urlopen
 
+from .cache import Cache
 from .http_api import read_token
 from .compiler import active, compile_state
 from .kube import Kubernetes
@@ -35,23 +36,46 @@ class LoadBalancerNode:
             raise RuntimeError("load balancer node did not acknowledge the expected state digest")
 
 
+def same_ingress(desired, current):
+    """Whether the published ingress already matches. API servers before Kubernetes 1.30 (or
+    with LoadBalancerIPMode disabled) drop ipMode, so a missing ipMode is not a difference;
+    otherwise every tick would rewrite the status of every Service."""
+    return (len(desired) == len(current)
+            and all(d["ip"] == c.get("ip") and c.get("ipMode", d["ipMode"]) == d["ipMode"]
+                    for d, c in zip(desired, current)))
+
+
 class Controller:
-    def __init__(self, kube, lb_node, pool, node_cidr, pool_config_path=None):
+    def __init__(self, kube, lb_node, pool, node_cidr, pool_config_path=None, cache=None):
         self.kube, self.lb_node = kube, lb_node
         self.pool, self.node_cidr = pool, node_cidr
         self.pool_config_path = pool_config_path
+        self.cache = cache
         self.warnings = {}
+
+    def snapshot(self):
+        if self.cache:
+            # Raises until every cache reflects a complete list and an unbroken watch.
+            return self.cache.snapshot()
+        return (self.kube.list_all("/api/v1/services"), self.kube.list_all("/api/v1/nodes"),
+                self.kube.list_all("/apis/discovery.k8s.io/v1/endpointslices"))
+
+    def patch(self, svc, field, value, status=False):
+        result = self.kube.patch(svc, field, value, status=status)
+        if self.cache:
+            # Write through so the next tick does not act on the pre-patch object.
+            self.cache.observe_service(result)
+        return result
 
     def reconcile(self):
         # Any incomplete/failed API snapshot aborts the whole tick; never push an accidental empty state.
         pool = PoolConfig.from_file(self.pool_config_path) if self.pool_config_path else self.pool
-        services = self.kube.list_all("/api/v1/services")
-        nodes = self.kube.list_all("/api/v1/nodes")
-        slices = self.kube.list_all("/apis/discovery.k8s.io/v1/endpointslices")
+        services, nodes, slices = self.snapshot()
+        services = list(services)
         for index, svc in enumerate(services):
             finalizers = svc["metadata"].get("finalizers", [])
             if active(svc) and FINALIZER not in finalizers:
-                services[index] = self.kube.patch(svc, "/metadata/finalizers", finalizers + [FINALIZER])
+                services[index] = self.patch(svc, "/metadata/finalizers", finalizers + [FINALIZER])
         plan = compile_state(services, nodes, slices, pool, self.node_cidr)
         # Re-send every tick, including empty state, so load balancer node restarts recover without controller state.
         self.lb_node.apply(plan.state)
@@ -71,12 +95,12 @@ class Controller:
                 self.warnings.pop(uid, None)
             ingress = [{"ip": plan.assignments[uid], "ipMode": "Proxy"}] if uid in plan.assignments else []
             current = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
-            if ingress != current:
+            if not same_ingress(ingress, current):
                 status = dict(svc.get("status", {}))
                 status["loadBalancer"] = {"ingress": ingress}
-                svc = self.kube.patch(svc, "/status", status, status=True)
+                svc = self.patch(svc, "/status", status, status=True)
             if not active(svc):
-                self.kube.patch(svc, "/metadata/finalizers", [f for f in finalizers if f != FINALIZER])
+                self.patch(svc, "/metadata/finalizers", [f for f in finalizers if f != FINALIZER])
         live_uids = {s["metadata"]["uid"] for s in services}
         self.warnings = {uid: warning for uid, warning in self.warnings.items() if uid in live_uids}
         LOG.info("reconciled services=%d listeners=%d errors=%d", len(plan.assignments),
@@ -98,6 +122,8 @@ def main():
     parser.add_argument("--allow-private-http", action="store_true",
                         help="Allow plaintext bearer token on an explicitly trusted private network")
     parser.add_argument("--ready-file")
+    parser.add_argument("--resync", type=float, default=600,
+                        help="Seconds between full relists of the watched resources")
     args = parser.parse_args()
     if not args.lb_node.startswith("https://") and not (args.allow_private_http and args.lb_node.startswith("http://")):
         parser.error("use HTTPS or explicitly allow private-network HTTP")
@@ -105,10 +131,17 @@ def main():
         parser.error("--client-cert and --client-key must be used together")
     if args.client_cert and not args.lb_node.startswith("https://"):
         parser.error("client certificates require an https:// load balancer node URL")
+    if args.resync < 30:
+        parser.error("resync must be at least 30 seconds")
     if args.interval < 1:
         parser.error("interval must be at least one second")
     logging.basicConfig(level=logging.INFO)
-    controller = Controller(Kubernetes(), LoadBalancerNode(args.lb_node, args.token_file, args.ca_file, args.client_cert, args.client_key), args.ip, args.node_cidr, args.pool_config)
+    kube = Kubernetes()
+    cache = Cache(kube, args.resync).start()
+    if not cache.wait(120):
+        LOG.warning("watch caches are not synced yet; reconciliation waits for them")
+    controller = Controller(kube, LoadBalancerNode(args.lb_node, args.token_file, args.ca_file, args.client_cert,
+                                                   args.client_key), args.ip, args.node_cidr, args.pool_config, cache)
     ready = Path(args.ready_file) if args.ready_file else None
     while True:
         try:
