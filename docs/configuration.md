@@ -55,8 +55,16 @@ available pool IP. Selection does not spill into another named pool.
 
 Keep reserved literal ports outside your Kubernetes NodePort range. Kubernetes makes ordinary
 NodePorts unique, but cannot prevent an administrator reserving the same numeric port for
-another Service. Duplicate resolved `(IP, protocol, port)` listeners reject the full snapshot rather
-than choosing a winner. Do not use port reservations to bypass this constraint.
+another Service. When two Services resolve to the same `(IP, protocol, port)`, the Service
+whose reservation produced that literal port keeps it, otherwise the older Service (then the
+lower `namespace/name`). A Service is published only if it keeps every listener it needs; the
+other is not published at all and gets a warning Event naming the holder. A Service whose own
+ports resolve to the same listener fails the same way. Every other Service is unaffected. Do not use port reservations to bypass this constraint.
+
+On each tick the controller also asks the daemon (`GET /v1/info`) which IPs, reserved ports
+and NodePort range it accepts. A Service that the daemon would refuse fails on its own, with a
+warning Event, instead of making the daemon reject the whole snapshot. If the controller's
+`--node-cidr` is not inside the daemon's, every tick fails with an error saying so.
 
 `shared_ports` is not a supported field. Unreserved ports always use NodePort numbers; there
 is no separate automatic high-port allocator.

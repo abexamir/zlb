@@ -586,6 +586,10 @@ HTTP results:
 - `200 {"digest": "..."}`: verified apply; `GET /healthz` instead returns `{"alive": true}`.
 - `400`: malformed JSON/schema, invalid fields, IP/protocol/port/range, or request size.
 - `401`: wrong/missing token. Unknown endpoint paths return `404`.
+- `GET /v1/info` (token required) returns the accepted wire versions, public IPs, node CIDR,
+  reserved ports and backend NodePort range. The controller uses it to fail Services
+  individually.
+- Rejections (`400`) are logged by the daemon, and the controller logs the daemon's reason.
 - `503`: rule/address application failed; inspect daemon logs and rollback results.
 
 The body must have Content-Length between 1 byte and 2 MiB. Transfer-Encoding is rejected;
@@ -917,8 +921,9 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
 - A reservation grants literal ports only when they are actual Service ports. Reserving 443
   does not open 443 unless the owner declares Service port 443 and is a LoadBalancer.
 - Ordinary Kubernetes NodePorts usually avoid collisions. A literal reservation can still
-  collide with another Service's high NodePort. Duplicate listener detection rejects the
-  full compiled snapshot rather than silently selecting a winner; no automatic IP fallback.
+  collide with another Service's high NodePort. The reservation owner, otherwise the older
+  Service, keeps the listener; the other Service fails alone with a warning Event. There is
+  no automatic IP fallback.
 - A wrong physical IP owner is not detectable through local address inventory. Verify upstream
   allocation and ARP before use. Network and broadcast addresses of an on-link subnet are
   not usable VM addresses; zlb does not infer provider subnet policy from pool IP strings.
@@ -943,10 +948,13 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
 
 - Failed or incomplete list/watch never produces an accidental empty snapshot: ticks fail
   until every cache has resynced. Kubernetes API changes are reconciled on later ticks.
-- A per-Service error removes only that Service from the next accepted desired state; a
-  global compiler/validation error prevents the entire new state from being pushed.
-- If LB apply succeeds but a status/Event/finalizer patch fails, forwarding may be live with
-  stale Kubernetes status. The next tick retries. Readiness is removed on any failed tick.
+- A per-Service error removes only that Service from the next accepted desired state. That
+  includes listener collisions and anything the daemon's `/v1/info` says it would refuse.
+  Only invalid pool policy, a node-CIDR mismatch or a transport failure stops the whole push.
+- Kubernetes writes are isolated per Service. A failed finalizer patch keeps that Service
+  unpublished for the tick; failed status or finalizer-release patches are retried next tick;
+  a failed Event is only logged. The other Services are still updated, and the tick is then
+  reported as failed, which drops readiness, with the first failure in the log.
 - A tick with handled per-Service errors can still complete and be Ready. Ready means the
   control loop completed; inspect warning Events and `errors=` as well as application traffic.
 - Controller/API outage leaves installed rules unless another owner or lifecycle action

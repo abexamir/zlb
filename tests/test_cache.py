@@ -232,6 +232,7 @@ class StatusTests(unittest.TestCase):
         cache.snapshot.return_value = ([svc], [], [])
         kube.patch.side_effect = lambda svc, field, value, status=False: dict(svc, metadata=dict(svc["metadata"], finalizers=[FINALIZER]))
         lb_node = Mock()
+        lb_node.info.return_value = None
         Controller(kube, lb_node, ["198.51.100.10"], "10.0.0.0/24", cache=cache).reconcile()
         kube.list_all.assert_not_called()
         self.assertTrue(cache.observe_service.called)

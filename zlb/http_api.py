@@ -61,10 +61,27 @@ def make_handler(applier, token, apply_error="Load balancer node apply failed; r
             self.end_headers()
             self.wfile.write(body)
 
+        def authorized(self):
+            try:
+                expected = token() if callable(token) else token
+            except (OSError, ValueError):
+                LOG.exception("cannot read the API token; rejecting request")
+                self.response(503, {"error": "token unavailable"})
+                return False
+            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + expected).encode()):
+                self.response(401, {"error": "unauthorized"})
+                return False
+            return True
+
         def do_GET(self):
             self.deadline.cancel()
             if self.path == "/healthz":
                 self.response(200, {"alive": True})
+            elif self.path == "/v1/info":
+                # What this daemon accepts, so the controller can reject a Service on its own
+                # instead of sending a snapshot the daemon refuses as a whole.
+                if self.authorized():
+                    self.response(200, applier.info())
             else:
                 self.response(404, {"error": "not found"})
 
@@ -72,14 +89,7 @@ def make_handler(applier, token, apply_error="Load balancer node apply failed; r
             if self.path != "/v1/state":
                 self.response(404, {"error": "not found"})
                 return
-            try:
-                expected = token() if callable(token) else token
-            except (OSError, ValueError):
-                LOG.exception("cannot read the API token; rejecting request")
-                self.response(503, {"error": "token unavailable"})
-                return
-            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + expected).encode()):
-                self.response(401, {"error": "unauthorized"})
+            if not self.authorized():
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -92,6 +102,7 @@ def make_handler(applier, token, apply_error="Load balancer node apply failed; r
                 self.deadline.cancel()
                 revision = applier.apply(json.loads(raw))
             except (ValueError, TypeError, KeyError) as exc:
+                LOG.warning("rejected desired state: %s", exc)
                 self.response(400, {"error": str(exc)})
                 return
             except Exception:
