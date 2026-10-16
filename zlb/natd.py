@@ -175,9 +175,12 @@ def generation():
     The kernel advances it on every committed ruleset change, in any table and by any tool,
     but not for counter updates. An unchanged generation therefore proves the verified table
     is untouched without listing it, which takes seconds for large tables."""
+    family = getattr(socket, "AF_NETLINK", None)
+    if family is None:
+        return None
     nftables, get_generation, new_generation, request = 10, 16, 15, 1
     try:
-        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 12) as connection:  # NETLINK_NETFILTER
+        with socket.socket(family, socket.SOCK_RAW, 12) as connection:  # NETLINK_NETFILTER
             connection.settimeout(2)
             # nlmsghdr, then nfgenmsg (family, version, resource id).
             connection.send(struct.pack("=IHHII", 20, nftables << 8 | get_generation, request, 1, 0)
