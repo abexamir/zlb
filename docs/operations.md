@@ -19,6 +19,7 @@ On the load balancer node, inspect owned rules and counters without modifying th
 
 ```sh
 sudo nft -a list table ip zlb
+sudo nft list counters table ip zlb   # c_<id>: new connections per listener, kept across applies
 sudo ip -4 address show dev eth0
 sudo cat /var/lib/zlb/zlb-addresses.json
 curl --noproxy '*' --fail http://10.0.0.1:9808/healthz
