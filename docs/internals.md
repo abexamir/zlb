@@ -192,9 +192,9 @@ chain input {
 - **input** (filter, -10) uses `@guard` too, so denied or empty-backend listener traffic
   never reaches a local socket. An empty-backend listener maps straight to `drop`.
 - `--isolate-public-ips` adds input rules that accept only replies and ping to the public
-  IPs. `--hairpin-snat-from` adds a `postrouting` nat chain (priority 100) that masquerades
-  DNATed flows from those sources to the node CIDR. Nothing else is SNATed, and there is no
-  OUTPUT NAT.
+  IPs. `--hairpin-snat-from` adds a `postrouting` nat chain (priority 100) and a `hairpin`
+  set of the listener tuples; it masquerades flows from those sources whose original
+  (IP, protocol, port) is in the set. Nothing else is SNATed, and there is no OUTPUT NAT.
 - Base chains use policy accept: unmatched traffic continues, and other tables can still drop.
 
 ## Packet path

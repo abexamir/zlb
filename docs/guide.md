@@ -211,8 +211,9 @@ client address.
 **In-cluster clients (hairpin).** A Pod or node calling a public IP gets the reply straight
 from the backend node, not from the public IP, and drops it. `--hairpin-snat-from CIDR`
 (`bootstrap.hairpinSnatFrom`, usually the node CIDR, plus the Pod CIDR if your CNI does not
-SNAT Pod egress) masquerades those connections as the VM. Only zlb-DNATed connections from
-those sources are affected; external clients keep their address, and
+SNAT Pod egress) masquerades those connections as the VM. Only connections from those
+sources to a zlb listener's (IP, protocol, port) are affected; external clients and DNAT you
+configured yourself on the same IPs keep their source address, and
 `loadBalancerSourceRanges` still sees the original source. Traffic the VM itself sends to a
 public IP is never forwarded; test from another host.
 
