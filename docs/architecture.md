@@ -65,21 +65,25 @@ The FORWARD chain also drops new or invalid connections arriving on the public i
 that were not DNATed, so enabling IPv4 forwarding does not turn the VM into an open router
 into the node CIDR. Optional input isolation hides VM-local services on the public IPs.
 
-Source ACLs gate DNAT. Filter rules check the original conntrack IP, protocol and port, so
+Listener lookups use nftables verdict maps keyed by `(IP, protocol, port)`, so per-packet
+cost does not grow with the number of listeners and the table holds one chain per listener.
+Source ACLs gate DNAT. Filter rules look up the original conntrack IP, protocol and port, so
 source-denied or empty-backend traffic cannot fall through to a load balancer node-local socket.
 Established DNAT flows with reply sources in the node CIDR remain accepted after backend
 changes, listener removal, or ACL tightening. New connections use a per-listener round-robin
-`numgen inc` verdict map; conntrack pins each flow to its selected backend.
+`numgen inc` DNAT map; conntrack pins each flow to its selected backend. A named counter
+per listener (`c_<id>`) counts new connections and keeps its value across applies.
 No SNAT or conntrack flush is introduced.
 
 An apply snapshots only the owned table, validates the complete candidate with `nft --check`,
 adds missing configured interface addresses, atomically replaces the whole table, and reads
-back the ownership marker, chain hooks and rule inventory. Only then does it retire removed
+back the ownership marker, chain hooks, chains, rules, map elements and counters. Only then does it retire removed
 owned addresses and acknowledge the digest. Failure attempts to restore and verify the prior
 table and owned addresses. A rollback failure is logged and never acknowledged as success.
 Interface changes and a firewall transaction cannot be one atomic kernel operation.
 
-An unchanged acknowledged snapshot avoids a commit if its kernel fingerprint still matches.
+An unchanged acknowledged snapshot costs one read-only table listing: it is not re-rendered,
+re-checked or committed while its kernel fingerprint still matches.
 Owned-rule drift triggers a reapply. A per-table file lock prevents concurrent local writers.
 An unrelated table with the same name is rejected, including during cleanup.
 
