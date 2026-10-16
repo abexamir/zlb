@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
 from zlb.model import NODE_PORTS, digest, expand, port_range, validate_state
-from zlb.natd import Applier, cleanup_reason, host_guards, layout, listener_id, render, stable
+from zlb.natd import Applier, cleanup_reason, generation, host_guards, layout, listener_id, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
 IP = "198.51.100.10"
@@ -17,6 +17,11 @@ STATE = {"version": 2, "listeners": [{"ip": IP, "port": 80, "protocol": "TCP",
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_generation_falls_back_without_netlink_support(self):
+        with patch("zlb.natd.socket.AF_NETLINK", None, create=True), patch("zlb.natd.socket.socket") as constructor:
+            self.assertIsNone(generation())
+            constructor.assert_not_called()
+
     def test_protocols_share_same_public_port(self):
         state = copy.deepcopy(STATE)
         state["listeners"] = [dict(state["listeners"][0], protocol=p) for p in ("TCP", "UDP", "SCTP")]
