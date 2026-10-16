@@ -10,4 +10,4 @@ Replace documentation IPs, example identities and image placeholders with operat
 - `kubernetes/canary.yaml`: temporary HTTP workload and LoadBalancer Service for traffic tests.
 
 The chart does not discover network topology. The load balancer node's public allowlist, routing and
-interface must match your installation. See [installation](../docs/installation.md).
+interface must match your installation. See the [operator guide](../docs/guide.md).

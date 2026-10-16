@@ -1,3 +1,15 @@
+# Manual installation of the daemon (SSH bootstrap does all of this for you):
+#   install -d /opt/zlb && cp -r zlb /opt/zlb/            # the zlb/ package, as /opt/zlb/zlb
+#   useradd --system --user-group --no-create-home --home-dir /nonexistent \
+#     --shell /usr/sbin/nologin zlb-natd
+#   install -d -m 0755 /etc/zlb && install -m 0640 -o root -g zlb-natd token /etc/zlb/token
+#   echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-zlb-forwarding.conf && sysctl --system
+#   cp zlb-natd.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now zlb-natd.service
+# ExecStopPost needs --listen and must repeat ExecStart's --ip, --public-interface,
+# --node-cidr, --table and --state-dir. To restart without removing forwarding (for example after copying a new
+# package): touch /run/zlb/zlb.keep && systemctl restart zlb-natd.service
+# An API port below 1024 also needs CAP_NET_BIND_SERVICE in both capability lines.
 [Unit]
 Description=zlb nftables load balancer node
 After=network-online.target
@@ -6,20 +18,38 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/zlb
-ExecStart=/usr/bin/python3 -m zlb.natd --listen 10.0.0.1 --token-file /etc/zlb/token --ip 198.51.100.10 --public-interface eth0 --node-cidr 10.0.0.0/24
-ExecStopPost=/usr/bin/python3 -m zlb.natd --cleanup --listen 10.0.0.1 --ip 198.51.100.10 --public-interface eth0 --node-cidr 10.0.0.0/24
+ExecStart=/usr/bin/python3 -m zlb.natd --listen 10.0.0.3 --ip 198.51.100.10 --public-interface eth0 --node-cidr 10.0.0.0/24 --token-file /etc/zlb/token
+ExecStopPost=/usr/bin/python3 -m zlb.natd --cleanup --listen 10.0.0.3 --ip 198.51.100.10 --public-interface eth0 --node-cidr 10.0.0.0/24
 Restart=on-failure
 RestartSec=2
+User=zlb-natd
+Group=zlb-natd
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
 RuntimeDirectory=zlb
 RuntimeDirectoryMode=0700
 StateDirectory=zlb
 StateDirectoryMode=0700
 UMask=0077
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-ProtectHome=true
 ProtectSystem=strict
+ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

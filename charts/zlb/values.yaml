@@ -3,17 +3,23 @@ nameOverride: ""
 fullnameOverride: ""
 image:
   repository: ghcr.io/abexamir/zlb
-  tag: "0.4.0"
+  tag: "0.5.0"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 lbNode:
+  # Daemon API URL including its port, e.g. https://10.0.0.3:9808. With SSH bootstrap the
+  # host must be the VM's IPv4 address; the daemon is configured to listen on it.
   url: ""
   allowPrivateHTTP: false
   existingSecret: ""
   tokenKey: token
-  # Optional existing ConfigMap containing a CA certificate under ca.crt.
+  # Optional existing ConfigMap containing the CA that signed the daemon's HTTPS
+  # certificate, under ca.crt.
   caConfigMap: ""
+  # Optional existing kubernetes.io/tls Secret (tls.crt, tls.key) the controller presents
+  # to a daemon that requires client certificates.
+  clientCertSecret: ""
 nodeCIDR: ""
 interval: 5
 pools:
@@ -29,12 +35,19 @@ resources:
   limits:
     cpu: 250m
     memory: 128Mi
+rbac:
+  # Install a ValidatingAdmissionPolicy (Kubernetes 1.30+) that limits the controller's
+  # Service writes to its own finalizer and zlb.zarrino.tech/published-ports annotation.
+  # Skipped automatically when the API is unavailable.
+  restrictServiceWrites: true
 nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
 
-# Optional controller-driven provisioning of a dedicated Debian/Ubuntu VM.
+# Optional SSH provisioning of a dedicated Debian/Ubuntu VM. A pre-install/pre-upgrade/
+# pre-rollback hook Job (and the optional CronJob) runs it; the controller never receives the
+# SSH key. sshHost must be the VM's IPv4 address.
 bootstrap:
   enabled: false
   existingSecret: ""
@@ -44,3 +57,34 @@ bootstrap:
   sshPort: 22
   publicInterface: ""
   publicIPs: []
+  # The daemon only forwards to backend ports in this range. Match the cluster's
+  # --service-node-port-range.
+  backendPortRange: "30000-32767"
+  # With an https:// lbNode.url: existing Secret holding the daemon's HTTPS certificate
+  # (tls.crt, with an IP SAN for the lbNode.url host) and key (tls.key). Add ca.crt and set
+  # requireClientCertificates to make the daemon demand lbNode.clientCertSecret.
+  tlsSecret: ""
+  requireClientCertificates: false
+  # Optional CIDRs allowed to connect to the daemon API, e.g. your node CIDR.
+  apiAllowFrom: []
+  # The daemon drops new connections arriving on the public interface unless they were
+  # DNATed, so the VM cannot be used as a router into the node network. Set true only if
+  # this VM must also forward other traffic from its public side.
+  allowForeignForwarding: false
+  # Drop traffic to the public IPs that is not a listener, a reply or ping, hiding
+  # VM-local services such as sshd. Keep false if you administer the VM via a public IP.
+  isolatePublicIPs: false
+  # Optional source CIDRs (usually the node CIDR) whose connections to the public IPs are
+  # masqueraded as the VM, so Pods and nodes can reach LoadBalancer IPs from inside the
+  # cluster. Those connections lose their client address; other clients keep theirs.
+  hairpinSnatFrom: []
+  # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
+  # bootstrap only on Helm install and upgrade.
+  schedule: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 96Mi

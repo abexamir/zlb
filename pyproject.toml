@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zlb"
-version = "0.4.0"
+version = "0.5.0"
 description = "Static public-IP load balancing through an external load balancer node"
 requires-python = ">=3.11"
 dependencies = []
@@ -24,3 +24,20 @@ zlb-natd = "zlb.natd:main"
 
 [tool.setuptools]
 packages = ["zlb"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 130
+
+[tool.ruff.lint]
+# Syntax errors, pyflakes and bugbear. B023 is ignored because every flagged lambda is called
+# immediately (the controller's per-Service attempt() and quiesce's optional()).
+select = ["E9", "F", "B"]
+ignore = ["B023"]
+
+[tool.coverage.run]
+source = ["zlb"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = false

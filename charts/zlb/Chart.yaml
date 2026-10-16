@@ -2,8 +2,8 @@ apiVersion: v2
 name: zlb
 description: Kubernetes LoadBalancer controller for an external Linux nftables load balancer node
 type: application
-version: 0.2.0
-appVersion: "0.4.0"
+version: 0.3.0
+appVersion: "0.5.0"
 home: https://github.com/abexamir/zlb
 sources:
   - https://github.com/abexamir/zlb

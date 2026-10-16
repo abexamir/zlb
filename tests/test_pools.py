@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from zlb.controller import Controller
-from zlb.model import PREFIX
+from zlb.model import PREFIX, PUBLISHED
 from zlb.pools import PoolConfig
 from test_zlb import CIDR, POOL, FakeKube, plan, service
 
@@ -19,10 +19,9 @@ def configuration():
 
 class PoolTests(unittest.TestCase):
     def test_reserved_ports_stay_literal_everything_else_uses_nodeport(self):
-        # "apps/ingress" owns 80+443 on POOL[0] -- its own listeners stay literal. Neither
-        # other Service is reserved anything, so each publishes its own nodePort instead,
-        # whatever its requested .port happened to be (user request 2026-10-15: "if it's not
-        # a reserved service, just port forward its ports to a high port").
+        # "apps/ingress" owns 80 and 443 on POOL[0], so its listeners stay literal. The other
+        # Services hold no reservation and publish their own nodePorts, whatever their
+        # Service ports are.
         ingress = service("ingress", 443, node_port=30443)
         database = service("database", 30432, node_port=31000)
         extra = service("extra", 32000, node_port=31001)
@@ -127,6 +126,7 @@ class PoolTests(unittest.TestCase):
             path = Path(directory) / "pools.json"
             path.write_text('{"pools":')
             kube, lb_node = FakeKube([service()]), Mock()
+            lb_node.info.return_value = None
             controller = Controller(kube, lb_node, None, CIDR, path)
             with self.assertRaises(ValueError):
                 controller.reconcile()
@@ -142,6 +142,7 @@ class PoolTests(unittest.TestCase):
             raw = {"default_pool": "public", "pools": [{"name": "public", "ips": POOL}]}
             path.write_text(json.dumps(raw))
             kube, lb_node = FakeKube([service("app", 443, node_port=31007)]), Mock()
+            lb_node.info.return_value = None
             controller = Controller(kube, lb_node, None, CIDR, path)
             controller.reconcile()
             self.assertEqual(lb_node.apply.call_args.args[0]["listeners"][0]["port"], 31007)
@@ -149,6 +150,13 @@ class PoolTests(unittest.TestCase):
             path.write_text(json.dumps(raw))
             controller.reconcile()
             self.assertEqual(lb_node.apply.call_args.args[0]["listeners"][0]["port"], 443)
+            self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: "443:443/TCP"}))
+
+    def test_ips_are_offered_in_numeric_order(self):
+        config = PoolConfig.parse({"default_pool": "public", "pools": [
+            {"name": "public", "ips": ["198.51.100.10", "198.51.100.9", "198.51.100.100"]}]})
+        self.assertEqual(config.ips, ["198.51.100.9", "198.51.100.10", "198.51.100.100"])
+        self.assertEqual(plan([service()], pool=config).assignments["web"], "198.51.100.9")
 
     def test_invalid_configuration_rejected(self):
         mutations = [

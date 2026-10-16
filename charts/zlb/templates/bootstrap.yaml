@@ -1,0 +1,47 @@
+{{- if .Values.bootstrap.enabled }}
+# Installs or updates zlb-natd before the controller is installed, upgraded or rolled
+# back, so the daemon is always at least as new as the controller that talks to it. On
+# upgrade and rollback the quiesce hook (lower weight) has already stopped every other
+# bootstrap writer.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "zlb.fullname" . }}-bootstrap
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 2400
+  template:
+    {{- include "zlb.bootstrapPod" . | nindent 4 }}
+{{- if .Values.bootstrap.schedule }}
+---
+# Optional drift repair, for example after the VM is rebuilt outside Helm.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "zlb.fullname" . }}-bootstrap
+  labels:
+    {{- include "zlb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+spec:
+  schedule: {{ .Values.bootstrap.schedule | quote }}
+  # Explicit so an upgrade resumes the CronJob after the quiesce hook suspended it.
+  suspend: false
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      template:
+        {{- include "zlb.bootstrapPod" . | nindent 8 }}
+{{- end }}
+{{- end }}

@@ -55,17 +55,10 @@ spec:
             {{- if .Values.lbNode.caConfigMap }}
             - --ca-file=/var/run/zlb-ca/ca.crt
             {{- end }}
-            {{- if .Values.bootstrap.enabled }}
-            - --bootstrap-key-file=/var/run/zlb-ssh/private_key
-            - --bootstrap-known-hosts-file=/var/run/zlb-ssh/known_hosts
-            - {{ printf "--bootstrap-ssh-host=%s" (required "bootstrap.sshHost is required" .Values.bootstrap.sshHost) | quote }}
-            - {{ printf "--bootstrap-ssh-user=%s" .Values.bootstrap.sshUser | quote }}
-            - {{ printf "--bootstrap-ssh-port=%v" .Values.bootstrap.sshPort | quote }}
-            - {{ printf "--bootstrap-interface=%s" (required "bootstrap.publicInterface is required" .Values.bootstrap.publicInterface) | quote }}
-            {{- if not .Values.bootstrap.publicIPs }}{{ fail "bootstrap.publicIPs is required" }}{{- end }}
-            {{- range .Values.bootstrap.publicIPs }}
-            - {{ printf "--bootstrap-ip=%s" . | quote }}
-            {{- end }}
+            {{- if .Values.lbNode.clientCertSecret }}
+            {{- if not (hasPrefix "https://" .Values.lbNode.url) }}{{ fail "lbNode.clientCertSecret requires an https:// lbNode.url" }}{{ end }}
+            - --client-cert=/var/run/zlb-client/tls.crt
+            - --client-key=/var/run/zlb-client/tls.key
             {{- end }}
           readinessProbe:
             exec:
@@ -84,25 +77,19 @@ spec:
               drop: [ALL]
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
-            {{- if .Values.bootstrap.enabled }}
-            - {name: ssh, mountPath: /var/run/zlb-ssh, readOnly: true}
-            {{- end }}
             - {name: pools, mountPath: /etc/zlb, readOnly: true}
             - {name: token, mountPath: /var/run/zlb, readOnly: true}
             {{- if .Values.lbNode.caConfigMap }}
             - {name: ca, mountPath: /var/run/zlb-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.lbNode.clientCertSecret }}
+            - {name: client, mountPath: /var/run/zlb-client, readOnly: true}
             {{- end }}
       volumes:
         - name: tmp
           emptyDir:
             medium: Memory
             sizeLimit: 32Mi
-        {{- if .Values.bootstrap.enabled }}
-        - name: ssh
-          secret:
-            secretName: {{ required "bootstrap.existingSecret is required" .Values.bootstrap.existingSecret }}
-            defaultMode: 0440
-        {{- end }}
         - name: pools
           configMap:
             name: {{ include "zlb.fullname" . }}-pools
@@ -117,6 +104,12 @@ spec:
         - name: ca
           configMap:
             name: {{ .Values.lbNode.caConfigMap }}
+        {{- end }}
+        {{- if .Values.lbNode.clientCertSecret }}
+        - name: client
+          secret:
+            secretName: {{ .Values.lbNode.clientCertSecret }}
+            defaultMode: 0440
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

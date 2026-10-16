@@ -5,49 +5,185 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  # A new push to a pull request cancels its previous run; main and tag runs always finish.
+  group: ci-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  # Go tools are installed with `go install`, which the Go checksum database verifies.
+  ACTIONLINT: github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+  KUBECONFORM: github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+  KIND: sigs.k8s.io/kind@v0.33.0
+  GOTOOLCHAIN: auto
+  HELM_VERSION: v3.19.0
 jobs:
-  unit:
+  lint:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.13", "3.14"]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q zlb tests scripts
-  chart-and-docs:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Python (ruff)
+        run: ruff check --output-format=github zlb tests scripts
+      - name: Workflows (actionlint, with shellcheck)
+        run: |
+          go install "$ACTIONLINT"
+          "$(go env GOPATH)/bin/actionlint" -color
+      - name: Workflow security (zizmor)
+        run: zizmor --offline --min-severity low .github/workflows
+
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m compileall -q zlb tests scripts
+      - run: python -m unittest discover -s tests -v
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: coverage run -m unittest discover -s tests
+      - name: Report (fails below the threshold in pyproject.toml)
+        run: |
+          coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          coverage report
+
+  chart-and-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
-          version: v3.19.0
+          version: ${{ env.HELM_VERSION }}
       - run: pip install -r requirements-dev.txt
       - run: python scripts/check_docs.py
       - run: helm lint charts/zlb -f examples/helm-values.yaml
-      - run: helm template zlb charts/zlb -f examples/helm-values.yaml > /tmp/zlb.yaml
-      - run: python scripts/package_chart.py --output /tmp/charts --version 0.2.0-ci.1 --image-tag sha-test
-  nat:
+      - run: python scripts/check_chart.py
+      - name: Validate rendered manifests against Kubernetes schemas
+        run: |
+          go install "$KUBECONFORM"
+          bootstrap=(--set bootstrap.enabled=true --set bootstrap.existingSecret=zlb-ssh
+                     --set bootstrap.sshHost=10.0.0.3 --set bootstrap.publicInterface=eth0
+                     --set 'bootstrap.publicIPs={198.51.100.10/32}' --set 'bootstrap.schedule=0 * * * *')
+          for version in 1.30.0 master; do
+            api=()
+            [ "$version" = master ] || api=(--kube-version "$version")
+            for variant in default bootstrap; do
+              args=()
+              [ "$variant" = bootstrap ] && args=("${bootstrap[@]}")
+              helm template zlb charts/zlb -f examples/helm-values.yaml "${api[@]}" "${args[@]}" \
+                --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy |
+                "$(go env GOPATH)/bin/kubeconform" -strict -summary -kubernetes-version "$version"
+            done
+          done
+      - run: python scripts/package_chart.py --output /tmp/charts --version 0.0.0-ci.1 --image-tag sha-test
+
+  image:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: docker build -t zlb:ci .
+      - name: Smoke-test the controller image
+        run: |
+          controller=$(docker run --rm zlb:ci --help)
+          grep -q -- --lb-node <<<"$controller"
+          bootstrap=$(docker run --rm --entrypoint python zlb:ci -m zlb.bootstrap --help)
+          grep -q -- --known-hosts-file <<<"$bootstrap"
+          test "$(docker run --rm --entrypoint id zlb:ci -u)" = 65532
+
+  nat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Load SCTP kernel support
         run: sudo modprobe sctp
       - run: docker build -f tests/Dockerfile.nat -t zlb-nat-test:ci .
-      - run: docker run --rm --privileged --network none zlb-nat-test:ci
+      - name: Packet-level NAT suite and SSH bootstrap lifecycle
+        run: docker run --rm --privileged --network none zlb-nat-test:ci
+
+  e2e:
+    name: e2e (Kubernetes ${{ matrix.kubernetes }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kubernetes: "1.34"
+            image: kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256
+          - kubernetes: "1.37"
+            image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Build images
+        run: |
+          docker build -t zlb:e2e .
+          docker build -f tests/Dockerfile.nat -t zlb-nat-test:e2e .
+      - name: Create the kind cluster
+        env:
+          NODE_IMAGE: ${{ matrix.image }}
+        run: |
+          go install "$KIND"
+          kind="$(go env GOPATH)/bin/kind"
+          "$kind" create cluster --name zlb --config tests/kind.yaml --image "$NODE_IMAGE" --wait 180s
+          "$kind" load docker-image zlb:e2e --name zlb
+      - name: Install with Helm and test traffic, hairpin, admission policy, crash and deletion
+        run: python3 tests/e2e_kind.py zlb zlb:e2e zlb-nat-test:e2e
+
   secrets:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install checksum-verified Gitleaks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,3 +195,20 @@ jobs:
           tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
           sudo install gitleaks /usr/local/bin/gitleaks
       - run: gitleaks git . --redact
+
+  # The single status to require in branch protection. It must always run and fail unless
+  # every dependency succeeded: GitHub counts a skipped job as passing a required check, so
+  # a condition that skips it on cancellation would let a cancelled head through. (A run
+  # superseded by a newer push therefore shows red; only the newest head's run matters.)
+  ci-ok:
+    if: always()
+    needs: [lint, unit, coverage, chart-and-docs, image, nat, e2e, secrets]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for result in $RESULTS; do [ "$result" = success ] || exit 1; done

@@ -1,5 +1,4 @@
 import copy
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +7,7 @@ from unittest.mock import Mock, patch
 from zlb.compiler import compile_state
 from zlb.controller import Controller, LoadBalancerNode
 from zlb.kube import Kubernetes
-from zlb.model import CLASS, FINALIZER, PREFIX, digest, validate_state
+from zlb.model import CLASS, FINALIZER, PREFIX, PUBLISHED, expand
 from zlb.pools import PoolConfig
 
 POOL = ["198.51.100.10"]
@@ -36,17 +35,27 @@ def endpoint_slice(endpoints):
         "kubernetes.io/service-name": "web"}}, "endpoints": endpoints}
 
 
+class TestPlan:
+    """A compiled plan plus helpers that read its compact wire state."""
+    def __init__(self, plan):
+        self.plan = plan
+        self.state, self.assignments, self.errors = plan.state, plan.assignments, plan.errors
+
+    def __eq__(self, other):
+        return self.plan == other.plan
+
+    def backends(self, index):
+        return expand(self.state)[index]["backends"]
+
+
 def plan(services, nodes=None, slices=None, pool=None):
-    return compile_state(services, [node()] if nodes is None else nodes, slices or [], pool or POOL, CIDR)
+    return TestPlan(compile_state(services, [node()] if nodes is None else nodes, slices or [], pool or POOL, CIDR))
 
 
 class CompilerTests(unittest.TestCase):
     def test_unreserved_services_never_conflict_on_requested_port(self):
-        # user request 2026-10-15: "if it's not a reserved service, just port forward its
-        # ports to a high port ... that high port can be the same as the nodePort" -- the
-        # *requested* .port no longer has anything to collide over; each publishes its own
-        # nodePort instead, which Kubernetes already guarantees is unique cluster-wide. Two
-        # Services requesting the exact same literal port (80 here) is a complete non-event.
+        # Unreserved Services publish their own nodePort, which Kubernetes keeps unique
+        # cluster-wide, so two Services requesting the same Service port (80) never collide.
         a = service("a", 80, node_port=31010)
         c = service("c", 80, node_port=31011)
         result = plan([c, a])
@@ -74,9 +83,8 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("b", plan([b], pool=pool).errors)
 
     def test_claims_unclassified_ignores_foreign_and_deleting(self):
-        # No annotation or loadBalancerClass needed to get claimed (user request 2026-10-15):
-        # "a" has no loadBalancerClass at all and still gets a public IP. A Service naming a
-        # *different* class ("b") and one being deleted ("c") are still left alone.
+        # A LoadBalancer Service without a class ("a") is adopted with no annotation, like
+        # any default load balancer. Another class ("b") and a deleting Service ("c") are not.
         a, b, c = service("a"), service("b"), service("c")
         del a["spec"]["loadBalancerClass"]
         b["spec"]["loadBalancerClass"] = "other/controller"
@@ -93,7 +101,7 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(plan([service()], slices=[empty]).errors, {})
         svc = service()
         svc["spec"]["externalTrafficPolicy"] = "Local"
-        self.assertEqual(plan([svc], slices=[empty]).state["listeners"][0]["backends"], [])
+        self.assertEqual(plan([svc], slices=[empty]).backends(0), [])
 
     def test_cluster_filters_nodes(self):
         good = node()
@@ -102,7 +110,7 @@ class CompilerTests(unittest.TestCase):
         excluded["metadata"]["labels"] = {"node.kubernetes.io/exclude-from-external-load-balancers": ""}
         outside["status"]["addresses"][0]["address"] = "10.0.0.1"
         deleting["metadata"]["deletionTimestamp"] = "now"
-        backends = plan([service()], [unready, excluded, outside, good, deleting]).state["listeners"][0]["backends"]
+        backends = plan([service()], [unready, excluded, outside, good, deleting]).backends(0)
         self.assertEqual(backends, [{"ip": "10.20.0.10", "port": 30080}])
 
     def test_local_only_ready_nonterminating_endpoint_nodes(self):
@@ -113,8 +121,8 @@ class CompilerTests(unittest.TestCase):
             {"nodeName": "n2", "conditions": {"ready": False}},
             {"nodeName": "n3", "conditions": {"ready": True, "terminating": True}}])]
         result = plan([svc], [node(), node("n2", "10.20.0.11"), node("n3", "10.20.0.12")], slices)
-        self.assertEqual(result.state["listeners"][0]["backends"], [{"ip": "10.20.0.10", "port": 30080}])
-        self.assertEqual(plan([svc]).state["listeners"][0]["backends"], [])
+        self.assertEqual(result.backends(0), [{"ip": "10.20.0.10", "port": 30080}])
+        self.assertEqual(plan([svc]).backends(0), [])
 
     def test_invalid_service_does_not_block_valid(self):
         mutations = [lambda s: s["spec"]["ports"][0].update(protocol="ICMP"),
@@ -154,6 +162,16 @@ class FakeKube:
             result["status"] = value
         return result
 
+    def annotate(self, svc, key, value):
+        self.actions.append(("annotate", {key: value}))
+        result = copy.deepcopy(svc)
+        annotations = result["metadata"].setdefault("annotations", {})
+        if value is None:
+            annotations.pop(key, None)
+        else:
+            annotations[key] = value
+        return result
+
     def warning(self, svc, message):
         self.actions.append(("warning", message))
 
@@ -161,6 +179,7 @@ class FakeKube:
 class ControllerTests(unittest.TestCase):
     def controller(self, services, pool=None):
         kube, lb_node = FakeKube(services), Mock()
+        lb_node.info.return_value = None  # a daemon that predates /v1/info
         return Controller(kube, lb_node, pool if pool is not None else POOL, CIDR), kube, lb_node
 
     def test_finalizer_before_push_status_after_ack(self):
@@ -169,9 +188,10 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(kube.actions, [("/metadata/finalizers", [FINALIZER])])
         lb_node.apply.side_effect = apply
         controller.reconcile()
-        self.assertEqual(kube.actions[-1][0], "/status")
-        self.assertEqual(kube.actions[-1][1]["loadBalancer"]["ingress"],
+        self.assertEqual(kube.actions[-2][0], "/status")
+        self.assertEqual(kube.actions[-2][1]["loadBalancer"]["ingress"],
                          [{"ip": POOL[0], "ipMode": "Proxy"}])
+        self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: "80:30080/TCP"}))
 
     def test_failed_push_never_publishes_or_cleans_up(self):
         svc = service(previous=POOL[0])
@@ -190,6 +210,30 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(lb_node.apply.call_args.args[0]["listeners"], [])
         self.assertEqual(kube.actions[0], ("/status", {"loadBalancer": {"ingress": []}}))
         self.assertEqual(kube.actions[1], ("/metadata/finalizers", ["other/cleanup"]))
+
+    def test_published_ports_follow_the_assignment(self):
+        svc = service("multi", node_port=30080)
+        svc["spec"]["ports"].append({"port": 53, "protocol": "UDP", "nodePort": 30053})
+        svc["metadata"]["finalizers"] = [FINALIZER]
+        svc["metadata"]["annotations"] = {PUBLISHED: "80:30080/TCP,53:30053/UDP"}
+        svc["status"] = {"loadBalancer": {"ingress": [{"ip": POOL[0], "ipMode": "Proxy"}]}}
+        controller, kube, lb_node = self.controller([svc])
+        controller.reconcile()
+        self.assertEqual(kube.actions, [], "an unchanged mapping is not rewritten")
+        bad = copy.deepcopy(svc)
+        bad["spec"]["loadBalancerIP"] = POOL[0]
+        controller, kube, lb_node = self.controller([bad])
+        controller.reconcile()
+        self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: None}), "a rejected Service loses it")
+        bad["metadata"]["deletionTimestamp"] = "now"
+        controller, kube, lb_node = self.controller([bad])
+        controller.reconcile()
+        self.assertNotIn("annotate", [action for action, _ in kube.actions], "a deleted Service is not touched")
+
+    def test_missing_node_port_names_the_cause(self):
+        svc = service()
+        del svc["spec"]["ports"][0]["nodePort"]
+        self.assertIn("allocateLoadBalancerNodePorts", plan([svc]).errors["web"])
 
     def test_api_read_failure_does_not_push(self):
         controller, kube, lb_node = self.controller([service()])
@@ -214,12 +258,38 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(kube.actions[0][0], "warning")
         self.assertEqual(kube.actions[1], ("/status", {"loadBalancer": {"ingress": []}}))
 
-    def test_resource_version_conflict_propagates_without_push(self):
-        controller, kube, lb_node = self.controller([service()])
-        kube.patch = Mock(side_effect=RuntimeError("conflict"))
-        with self.assertRaises(RuntimeError):
+    def test_one_failed_finalizer_patch_never_publishes_that_service_but_spares_others(self):
+        controller, kube, lb_node = self.controller([service("a", node_port=30080), service("b", node_port=30081)])
+        patch = kube.patch
+        def flaky(svc, field, value, status=False):
+            if svc["metadata"]["name"] == "a":
+                raise RuntimeError("409 conflict")
+            return patch(svc, field, value, status)
+        kube.patch = flaky
+        with self.assertLogs("zlb.controller", level="WARNING"), self.assertRaisesRegex(RuntimeError, "1 Service update"):
             controller.reconcile()
-        lb_node.apply.assert_not_called()
+        # "a" lacks its finalizer, so it is not published; "b" is, and gets its status.
+        self.assertEqual([x["port"] for x in lb_node.apply.call_args.args[0]["listeners"]], [30081])
+        self.assertIn("/status", [field for field, _ in kube.actions])
+
+    def test_failed_status_patch_and_event_do_not_stop_other_services(self):
+        bad = service("bad", 443, node_port=30443)
+        bad["spec"]["ports"][0]["protocol"] = "ICMP"
+        services = [service("a", node_port=30080), bad, service("c", node_port=30082)]
+        for svc in services:
+            svc["metadata"]["finalizers"] = [FINALIZER]
+        controller, kube, lb_node = self.controller(services)
+        kube.warning = Mock(side_effect=RuntimeError("namespace is being terminated"))
+        patch = kube.patch
+        def flaky(svc, field, value, status=False):
+            if svc["metadata"]["name"] == "a":
+                raise RuntimeError("409 conflict")
+            return patch(svc, field, value, status)
+        kube.patch = flaky
+        with self.assertLogs("zlb.controller", level="WARNING"), self.assertRaisesRegex(RuntimeError, "a: publishing status"):
+            controller.reconcile()
+        self.assertEqual(sorted(x["port"] for x in lb_node.apply.call_args.args[0]["listeners"]), [30080, 30082])
+        self.assertEqual([v["loadBalancer"] for f, v in kube.actions if f == "/status"], [{"ingress": [{"ip": POOL[0], "ipMode": "Proxy"}]}])
 
 
 class TransportTests(unittest.TestCase):

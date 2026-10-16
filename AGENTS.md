@@ -4,7 +4,8 @@ Use this file as the repository-wide maintainer guidance. Keep future agent inst
 here; user-facing documentation belongs in README.md and docs/.
 
 zlb is a reusable Kubernetes LoadBalancer controller plus Linux load balancer node DNAT daemon.
-The primary user entry point is README.md; installation and operating guides are in docs/.
+The primary user entry point is README.md; docs/guide.md is the operator guide and docs/internals.md
+the design reference. Keep docs short, with each fact in one place.
 Use charts/zlb for Kubernetes installation and examples/ for portable operator inputs.
 Installation-specific infrastructure and operating records belong outside this repository.
 Helm deploys the controller. Optional SSH bootstrap manages packages and the daemon on one
@@ -24,17 +25,18 @@ explicit VM; infrastructure owns VM creation, trusted host keys, routing and fir
 
 ## Current implementation
 
-Python 3.11+ with the standard library. The controller polls Services, Nodes and discovery/v1
-EndpointSlices every five seconds with jitter. Read all paginated resources successfully
-before pushing a full snapshot, and treat null endpoint lists as empty.
+Python 3.11+ with the standard library. The controller keeps list+watch caches of trimmed
+Services, Nodes and discovery/v1 EndpointSlices and reconciles from them every five seconds
+with jitter. Only push a full snapshot while every cache reflects a complete, successful
+list and an unbroken watch, and treat null endpoint lists as empty.
 
 The load balancer node uses native nftables for IPv4 TCP, UDP and SCTP in one owned `table ip zlb`.
-One controller posts full schema-v2 desired state to one load balancer node. Ordinary ports publish
+One controller posts full desired state (wire schema v3; the daemon also accepts v2) to one load balancer node. Ordinary ports publish
 NodePorts; administrator reservations publish literal Service ports or dedicate an IP.
 Unclassified LoadBalancer Services are adopted. Listener identity includes protocol.
 The load balancer node assigns configured IPs to an explicit public interface. Its persistent address
 journal owns only addresses it added; preexisting and primary addresses must survive cleanup.
-It does not SNAT clients or manage the whole firewall. Return routing, CNI protocol support
+It does not SNAT external clients (in-cluster hairpin SNAT is opt-in) or manage the whole firewall. Return routing, CNI protocol support
 and application NetworkPolicies remain operator responsibilities.
 
 Keep the compiler pure, validate the wire format before rule generation, preserve independent
