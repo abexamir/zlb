@@ -196,10 +196,12 @@ jobs:
           sudo install gitleaks /usr/local/bin/gitleaks
       - run: gitleaks git . --redact
 
-  # The single status to require in branch protection. A run cancelled because a newer push
-  # superseded it reports nothing here instead of a failure; the newer run decides.
+  # The single status to require in branch protection. It must always run and fail unless
+  # every dependency succeeded: GitHub counts a skipped job as passing a required check, so
+  # a condition that skips it on cancellation would let a cancelled head through. (A run
+  # superseded by a newer push therefore shows red; only the newest head's run matters.)
   ci-ok:
-    if: ${{ !cancelled() }}
+    if: always()
     needs: [lint, unit, coverage, chart-and-docs, image, nat, e2e, secrets]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
