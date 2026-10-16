@@ -39,7 +39,15 @@ kubectl --kubeconfig "$ZLB_KUBECONFIG" --context "$ZLB_CONTEXT" -n apps get endp
 ```
 
 For an unreserved Service, use the NodePort as the external port. For a reserved port, use
-the literal Service port. Test from outside the load balancer node using your actual assigned address:
+the literal Service port. The controller records the mapping on the Service as
+`zlb.zarrino.tech/published-ports`, for example `5432:31543/TCP`:
+
+```sh
+kubectl --kubeconfig "$ZLB_KUBECONFIG" --context "$ZLB_CONTEXT" -n apps get service database \
+  -o jsonpath='{.metadata.annotations.zlb\.zarrino\.tech/published-ports}'
+```
+
+Test from outside the load balancer node using your actual assigned address:
 
 ```sh
 curl --noproxy '*' --connect-timeout 3 --max-time 10 http://198.51.100.10:31543/

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from zlb.controller import Controller
-from zlb.model import PREFIX
+from zlb.model import PREFIX, PUBLISHED
 from zlb.pools import PoolConfig
 from test_zlb import CIDR, POOL, FakeKube, plan, service
 
@@ -151,6 +151,13 @@ class PoolTests(unittest.TestCase):
             path.write_text(json.dumps(raw))
             controller.reconcile()
             self.assertEqual(lb_node.apply.call_args.args[0]["listeners"][0]["port"], 443)
+            self.assertEqual(kube.actions[-1], ("annotate", {PUBLISHED: "443:443/TCP"}))
+
+    def test_ips_are_offered_in_numeric_order(self):
+        config = PoolConfig.parse({"default_pool": "public", "pools": [
+            {"name": "public", "ips": ["198.51.100.10", "198.51.100.9", "198.51.100.100"]}]})
+        self.assertEqual(config.ips, ["198.51.100.9", "198.51.100.10", "198.51.100.100"])
+        self.assertEqual(plan([service()], pool=config).assignments["web"], "198.51.100.9")
 
     def test_invalid_configuration_rejected(self):
         mutations = [
