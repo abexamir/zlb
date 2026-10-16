@@ -20,7 +20,7 @@ LOG = logging.getLogger(__name__)
 
 # This runs as root on the explicitly configured VM. Input is carried only on SSH stdin.
 REMOTE = r'''
-import fcntl,hashlib,json,os,pathlib,shutil,subprocess,tempfile
+import fcntl,grp,hashlib,json,os,pathlib,pwd,shutil,subprocess,tempfile
 p=json.load(__import__('sys').stdin)
 def run(*args): subprocess.run(args,check=True,stdout=subprocess.DEVNULL,timeout=600)
 with open('/run/zlb-bootstrap.lock','w') as lock:
@@ -30,15 +30,23 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
  unit=pathlib.Path('/etc/systemd/system/zlb-natd.service')
  target=pathlib.Path('/opt/zlb/zlb')
  etc=pathlib.Path('/etc/zlb')
- tls_modes={'tls.crt':0o644,'tls.key':0o600,'client-ca.crt':0o644}
+ # Secrets are root-owned and readable by the daemon's group (0640); certificates are public.
+ tls_modes={'tls.crt':0o644,'tls.key':0o640,'client-ca.crt':0o644}
  if not set(p['tls'])<=set(tls_modes): raise ValueError('invalid TLS filename')
- config={etc/'token':(p['token']+'\n',0o600)}
+ config={etc/'token':(p['token']+'\n',0o640)}
  config.update({etc/name:(data,tls_modes[name]) for name,data in p['tls'].items()})
  stale=[etc/name for name in tls_modes if name not in p['tls']]
  modes={unit:0o644,marker:0o600,**{path:mode for path,(data,mode) in config.items()},
   **{etc/name:mode for name,mode in tls_modes.items() if name not in p['tls']}}
+ def group():
+  try: return grp.getgrnam('zlb-natd').gr_gid
+  except KeyError: return None
+ def owned(path,mode):
+  info=path.stat()
+  return info.st_mode&0o777==mode and info.st_uid==0 and info.st_gid==(group() if mode&0o077==0o040 else 0)
  def healthy():
-  return (marker.exists() and marker.read_text().strip()==revision and unit.exists()
+  return (marker.exists() and marker.read_text().strip()==revision and unit.exists() and group() is not None
+    and all(path.exists() and owned(path,mode) for path,(data,mode) in config.items())
     and unit.read_text()==p['unit']
     and all(path.exists() and path.read_text()==data for path,(data,mode) in config.items())
     and not any(path.exists() for path in stale)
@@ -53,6 +61,11 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
   if not shutil.which('apt-get'): raise RuntimeError('SSH bootstrap requires Debian/Ubuntu apt-get')
   run('apt-get','update')
   run('env','DEBIAN_FRONTEND=noninteractive','apt-get','install','-y','nftables','iproute2')
+ try: pwd.getpwnam('zlb-natd')
+ except KeyError:
+  run('useradd','--system','--user-group','--no-create-home','--home-dir','/nonexistent',
+      '--shell','/usr/sbin/nologin','zlb-natd')
+ gid=group()
  pathlib.Path('/var/lib/zlb-bootstrap').mkdir(mode=0o700,parents=True,exist_ok=True)
  for name in p['files']:
   if pathlib.PurePath(name).name!=name or not name.endswith('.py'): raise ValueError('invalid package filename')
@@ -66,7 +79,7 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
    path=pathlib.Path(path);path.parent.mkdir(parents=True,exist_ok=True)
    temporary=path.with_name('.'+path.name+'.new')
    with open(temporary,'wb') as stream: stream.write(data);stream.flush();os.fsync(stream.fileno())
-   os.chmod(temporary,mode);os.replace(temporary,path)
+   os.chown(temporary,0,gid if mode&0o077==0o040 else 0);os.chmod(temporary,mode);os.replace(temporary,path)
   try:
    if unit.exists(): run('systemctl','stop','zlb-natd.service')
    if target.exists(): shutil.rmtree(target)
@@ -96,8 +109,46 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
 '''
 
 
+# The daemon runs as this unprivileged system user with only CAP_NET_ADMIN.
+USER = 'zlb-natd'
+
+
+def sandbox(capabilities):
+    """systemd hardening shared by the generated and the example unit."""
+    caps=' '.join(capabilities)
+    return f'''User={USER}
+Group={USER}
+AmbientCapabilities={caps}
+CapabilityBoundingSet={caps}
+NoNewPrivileges=true
+RuntimeDirectory=zlb
+RuntimeDirectoryMode=0700
+StateDirectory=zlb
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+'''
+
+
 def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS, tls=False,
-         client_ca=False, allow_from=()):
+         client_ca=False, allow_from=(), allow_foreign_forwarding=False, isolate_public=False):
     first,last=(int(x) for x in backend_ports)
     if not 1<=first<=last<=65535:
         raise ValueError('invalid backend port range')
@@ -109,11 +160,14 @@ def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS, tls=
     if tls: args.extend(['--tls-cert','/etc/zlb/tls.crt','--tls-key','/etc/zlb/tls.key'])
     if client_ca: args.extend(['--tls-client-ca','/etc/zlb/client-ca.crt'])
     for network in allow_from: args.extend(['--allow-from',str(ipaddress.ip_network(network))])
+    if allow_foreign_forwarding: args.append('--allow-foreign-forwarding')
+    if isolate_public: args.append('--isolate-public-ips')
     # Share the privileged daemon's exact validation before generating any shell/systemd input.
     from .addresses import Addresses
     validated=Addresses(None,interface,ips,'/nonexistent/zlb-bootstrap-journal')
     for address in validated.desired.values(): args.extend(['--ip',address])
     command='/usr/bin/python3 -m zlb.natd '+shlex.join(args)
+    capabilities=['CAP_NET_ADMIN']+(['CAP_NET_BIND_SERVICE'] if int(port)<1024 else [])
     return f'''[Unit]
 Description=zlb nftables load balancer node (controller managed)
 After=network-online.target
@@ -125,24 +179,15 @@ ExecStart={command} --token-file /etc/zlb/token
 ExecStopPost={command} --cleanup
 Restart=on-failure
 RestartSec=2
-RuntimeDirectory=zlb
-RuntimeDirectoryMode=0700
-StateDirectory=zlb
-StateDirectoryMode=0700
-UMask=0077
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-ProtectHome=true
-ProtectSystem=strict
-PrivateTmp=true
-[Install]
+{sandbox(capabilities)}[Install]
 WantedBy=multi-user.target
 '''
 
 
 class SSHBootstrap:
     def __init__(self, host, user, key_file, known_hosts, token_file, listen, port, ips, interface,
-                 node_cidr, ssh_port=22, backend_ports=NODE_PORTS, tls_files=None, allow_from=()):
+                 node_cidr, ssh_port=22, backend_ports=NODE_PORTS, tls_files=None, allow_from=(),
+                 allow_foreign_forwarding=False, isolate_public=False):
         ipaddress.IPv4Address(host)
         if not user or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in user):
             raise ValueError('invalid SSH user')
@@ -155,7 +200,7 @@ class SSHBootstrap:
         if self.tls_files and not {'tls.crt','tls.key'}<=set(self.tls_files)<={'tls.crt','tls.key','client-ca.crt'}:
             raise ValueError('TLS needs tls.crt and tls.key, optionally client-ca.crt')
         self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports,bool(self.tls_files),
-                       'client-ca.crt' in self.tls_files,allow_from)
+                       'client-ca.crt' in self.tls_files,allow_from,allow_foreign_forwarding,isolate_public)
 
     def payload(self):
         files={path.name:path.read_text() for path in Path(__file__).parent.glob('*.py')}
@@ -208,6 +253,10 @@ def main(argv=None):
     parser.add_argument("--tls-client-ca-file", help="CA the daemon requires client certificates from")
     parser.add_argument("--allow-from", action="append", default=[], type=ipaddress.ip_network,
                         help="Restrict daemon API clients to this CIDR (repeatable)")
+    parser.add_argument("--allow-foreign-forwarding", action="store_true",
+                        help="Let the VM forward non-DNAT traffic arriving on its public interface")
+    parser.add_argument("--isolate-public-ips", action="store_true",
+                        help="Hide VM-local services on the public IPs")
     args = parser.parse_args(argv)
     endpoint = urlparse(args.lb_node)
     if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
@@ -223,7 +272,8 @@ def main(argv=None):
         SSHBootstrap(args.ssh_host or endpoint.hostname, args.ssh_user, args.key_file,
                      args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port or 9808,
                      args.ip, args.public_interface, args.node_cidr, args.ssh_port,
-                     args.backend_port_range, tls_files, args.allow_from).ensure()
+                     args.backend_port_range, tls_files, args.allow_from,
+                     args.allow_foreign_forwarding, args.isolate_public_ips).ensure()
     except Exception:
         LOG.exception("load balancer node bootstrap failed")
         return 1
