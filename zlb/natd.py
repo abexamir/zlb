@@ -300,6 +300,10 @@ class Applier:
         except Exception:
             LOG.exception("ADDRESS ROLLBACK FAILED; operator attention required")
 
+    def info(self):
+        return {"versions": list(VERSIONS), "ips": self.allowed_ips, "node_cidr": self.node_cidr,
+                "forbidden_ports": sorted(set(self.forbidden_ports)), "backend_ports": list(self.backend_ports)}
+
     def cleanup(self):
         if self.snapshot():
             self.command("nft", "delete", "table", "ip", self.table)

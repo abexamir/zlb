@@ -16,7 +16,9 @@ Check that:
 - Every pool IP is independently allowed by natd.
 
 The controller publishes status only after load balancer node acknowledgement. Warning Events describe
-per-Service validation failures; global compile or transport failures appear in logs.
+per-Service failures, including collisions and anything the daemon reports it would refuse.
+Global configuration and transport failures appear in the controller log, including the
+daemon's own rejection reason.
 An error for an unsupported field such as `shared_ports` means the configuration schema
 is wrong, not that restarting Kubernetes will help.
 
@@ -67,7 +69,8 @@ its owner. Do not delete an unrelated table. For address failures, inspect `ip -
 interface names and the persistent ownership journal. Addresses on another interface are
 rejected; preexisting addresses on the configured interface are preserved.
 
-A duplicate resolved listener rejects the full snapshot. Check for reserved literal ports
+A Service whose public listener is already used by another gets a warning Event naming the
+holder; the reservation owner or the older Service wins. Check for reserved literal ports
 inside the Kubernetes NodePort range, duplicate administrator reservations, or competing
 writers. Kubernetes' uniqueness guarantee applies to NodePorts, not independently reserved
 external port numbers.

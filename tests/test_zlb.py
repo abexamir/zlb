@@ -174,6 +174,7 @@ class FakeKube:
 class ControllerTests(unittest.TestCase):
     def controller(self, services, pool=None):
         kube, lb_node = FakeKube(services), Mock()
+        lb_node.info.return_value = None  # a daemon that predates /v1/info
         return Controller(kube, lb_node, pool if pool is not None else POOL, CIDR), kube, lb_node
 
     def test_finalizer_before_push_status_after_ack(self):
@@ -227,12 +228,38 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(kube.actions[0][0], "warning")
         self.assertEqual(kube.actions[1], ("/status", {"loadBalancer": {"ingress": []}}))
 
-    def test_resource_version_conflict_propagates_without_push(self):
-        controller, kube, lb_node = self.controller([service()])
-        kube.patch = Mock(side_effect=RuntimeError("conflict"))
-        with self.assertRaises(RuntimeError):
+    def test_one_failed_finalizer_patch_never_publishes_that_service_but_spares_others(self):
+        controller, kube, lb_node = self.controller([service("a", node_port=30080), service("b", node_port=30081)])
+        patch = kube.patch
+        def flaky(svc, field, value, status=False):
+            if svc["metadata"]["name"] == "a":
+                raise RuntimeError("409 conflict")
+            return patch(svc, field, value, status)
+        kube.patch = flaky
+        with self.assertLogs("zlb.controller", level="WARNING"), self.assertRaisesRegex(RuntimeError, "1 Service update"):
             controller.reconcile()
-        lb_node.apply.assert_not_called()
+        # "a" lacks its finalizer, so it is not published; "b" is, and gets its status.
+        self.assertEqual([x["port"] for x in lb_node.apply.call_args.args[0]["listeners"]], [30081])
+        self.assertIn("/status", [field for field, _ in kube.actions])
+
+    def test_failed_status_patch_and_event_do_not_stop_other_services(self):
+        bad = service("bad", 443, node_port=30443)
+        bad["spec"]["ports"][0]["protocol"] = "ICMP"
+        services = [service("a", node_port=30080), bad, service("c", node_port=30082)]
+        for svc in services:
+            svc["metadata"]["finalizers"] = [FINALIZER]
+        controller, kube, lb_node = self.controller(services)
+        kube.warning = Mock(side_effect=RuntimeError("namespace is being terminated"))
+        patch = kube.patch
+        def flaky(svc, field, value, status=False):
+            if svc["metadata"]["name"] == "a":
+                raise RuntimeError("409 conflict")
+            return patch(svc, field, value, status)
+        kube.patch = flaky
+        with self.assertLogs("zlb.controller", level="WARNING"), self.assertRaisesRegex(RuntimeError, "a: publishing status"):
+            controller.reconcile()
+        self.assertEqual(sorted(x["port"] for x in lb_node.apply.call_args.args[0]["listeners"]), [30080, 30082])
+        self.assertEqual([v["loadBalancer"] for f, v in kube.actions if f == "/status"], [{"ingress": [{"ip": POOL[0], "ipMode": "Proxy"}]}])
 
 
 class TransportTests(unittest.TestCase):

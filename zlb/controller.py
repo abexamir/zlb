@@ -1,11 +1,13 @@
 """Single-writer polling controller. Load balancer node apply always precedes status/cleanup."""
 import argparse
+import ipaddress
 import json
 import logging
 from pathlib import Path
 import random
 import ssl
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .cache import Cache
@@ -20,18 +22,40 @@ LOG = logging.getLogger(__name__)
 
 class LoadBalancerNode:
     def __init__(self, url, token_file, ca_file=None, client_cert=None, client_key=None):
-        self.url, self.token_file = url.rstrip("/") + "/v1/state", token_file
+        self.base, self.token_file = url.rstrip("/"), token_file
+        self.url = self.base + "/v1/state"
         self.context = ssl.create_default_context(cafile=ca_file)
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
         if client_cert:
             # Presented when the daemon runs with --tls-client-ca (mutual TLS).
             self.context.load_cert_chain(client_cert, client_key)
 
-    def apply(self, state):
-        request = Request(self.url, data=canonical(state), method="POST", headers={
+    def call(self, method, path, body=None, timeout=90):
+        request = Request(self.base + path, data=body, method=method, headers={
             "Authorization": "Bearer " + read_token(self.token_file), "Content-Type": "application/json"})
-        with urlopen(request, context=self.context, timeout=90) as response:
-            result = json.load(response)
+        try:
+            with urlopen(request, context=self.context, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as error:
+            # Surface the daemon's reason (e.g. which listener it refused), not just the code.
+            try:
+                reason = json.load(error).get("error")
+            except Exception:
+                reason = None
+            raise RuntimeError(f"load balancer node answered HTTP {error.code} to {method} {path}: "
+                               f"{reason or error.reason}") from None
+
+    def info(self):
+        """The daemon's acceptance constraints, or None for daemons that predate /v1/info."""
+        try:
+            return self.call("GET", "/v1/info", timeout=15)
+        except RuntimeError as error:
+            if "HTTP 404" in str(error):
+                return None
+            raise
+
+    def apply(self, state):
+        result = self.call("POST", "/v1/state", canonical(state))
         if result.get("digest") != digest(state):
             raise RuntimeError("load balancer node did not acknowledge the expected state digest")
 
@@ -67,19 +91,44 @@ class Controller:
             self.cache.observe_service(result)
         return result
 
+    def constraints(self):
+        """The daemon's acceptance rules, checked against this controller's configuration."""
+        info = self.lb_node.info()
+        if info is not None and not ipaddress.ip_network(self.node_cidr).subnet_of(ipaddress.ip_network(info["node_cidr"])):
+            raise RuntimeError(f"controller --node-cidr {self.node_cidr} is not inside the load balancer "
+                               f"node's --node-cidr {info['node_cidr']}; backends would be refused")
+        return info
+
     def reconcile(self):
         # Any incomplete/failed API snapshot aborts the whole tick; never push an accidental empty state.
         pool = PoolConfig.from_file(self.pool_config_path) if self.pool_config_path else self.pool
         services, nodes, slices = self.snapshot()
-        services = list(services)
-        for index, svc in enumerate(services):
+        constraints = self.constraints()
+        # One Service's API failure must not hold back the others: record it, skip that
+        # Service where needed, finish the tick, then report the tick as failed.
+        failures = []
+        def attempt(svc, action, call):
+            try:
+                return call()
+            except Exception as exc:
+                identity = f"{svc['metadata']['namespace']}/{svc['metadata']['name']}"
+                LOG.warning("service=%s %s failed: %s", identity, action, exc)
+                failures.append(f"{identity}: {action}: {exc}")
+                return None
+        ready = []
+        for svc in services:
             finalizers = svc["metadata"].get("finalizers", [])
             if active(svc) and FINALIZER not in finalizers:
-                services[index] = self.patch(svc, "/metadata/finalizers", finalizers + [FINALIZER])
-        plan = compile_state(services, nodes, slices, pool, self.node_cidr)
+                # Never publish a Service whose cleanup finalizer is not in place yet.
+                svc = attempt(svc, "adding the cleanup finalizer",
+                              lambda: self.patch(svc, "/metadata/finalizers", finalizers + [FINALIZER]))
+                if svc is None:
+                    continue
+            ready.append(svc)
+        plan = compile_state(ready, nodes, slices, pool, self.node_cidr, constraints)
         # Re-send every tick, including empty state, so load balancer node restarts recover without controller state.
         self.lb_node.apply(plan.state)
-        for svc in services:
+        for svc in ready:
             uid = svc["metadata"]["uid"]
             finalizers = svc["metadata"].get("finalizers", [])
             if FINALIZER not in finalizers:
@@ -88,7 +137,10 @@ class Controller:
             if error:
                 previous = self.warnings.get(uid)
                 if previous is None or previous[0] != error or time.monotonic() - previous[1] > 300:
-                    self.kube.warning(svc, error)
+                    try:
+                        self.kube.warning(svc, error)
+                    except Exception as exc:  # Events are best effort, e.g. in a terminating namespace.
+                        LOG.warning("could not record a warning Event: %s", exc)
                     self.warnings[uid] = (error, time.monotonic())
                 LOG.warning("service=%s/%s error=%s", svc["metadata"]["namespace"], svc["metadata"]["name"], error)
             else:
@@ -98,13 +150,18 @@ class Controller:
             if not same_ingress(ingress, current):
                 status = dict(svc.get("status", {}))
                 status["loadBalancer"] = {"ingress": ingress}
-                svc = self.patch(svc, "/status", status, status=True)
+                svc = attempt(svc, "publishing status", lambda: self.patch(svc, "/status", status, status=True))
+                if svc is None:
+                    continue
             if not active(svc):
-                self.patch(svc, "/metadata/finalizers", [f for f in finalizers if f != FINALIZER])
+                attempt(svc, "releasing the cleanup finalizer",
+                        lambda: self.patch(svc, "/metadata/finalizers", [f for f in finalizers if f != FINALIZER]))
         live_uids = {s["metadata"]["uid"] for s in services}
         self.warnings = {uid: warning for uid, warning in self.warnings.items() if uid in live_uids}
         LOG.info("reconciled services=%d listeners=%d errors=%d", len(plan.assignments),
                  len(plan.state["listeners"]), len(plan.errors))
+        if failures:
+            raise RuntimeError(f"{len(failures)} Service update(s) failed; first: {failures[0]}")
 
 
 def main():
