@@ -83,6 +83,12 @@ spec:
         {{- range .Values.bootstrap.apiAllowFrom }}
         - {{ printf "--allow-from=%s" . | quote }}
         {{- end }}
+        {{- if .Values.bootstrap.allowForeignForwarding }}
+        - --allow-foreign-forwarding
+        {{- end }}
+        {{- if .Values.bootstrap.isolatePublicIPs }}
+        - --isolate-public-ips
+        {{- end }}
       resources:
         {{- toYaml .Values.bootstrap.resources | nindent 8 }}
       securityContext:
