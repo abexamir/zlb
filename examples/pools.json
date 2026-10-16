@@ -1,0 +1,24 @@
+{
+  "default_pool": "public",
+  "blocked_ports": [
+    9808
+  ],
+  "pools": [
+    {
+      "name": "public",
+      "ips": [
+        "198.51.100.10"
+      ],
+      "reservations": [
+        {
+          "ip": "198.51.100.10",
+          "ports": [
+            80,
+            443
+          ],
+          "service": "ingress/ingress"
+        }
+      ]
+    }
+  ]
+}

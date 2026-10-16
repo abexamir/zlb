@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+*.tgz
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig*
+values.local.yaml
