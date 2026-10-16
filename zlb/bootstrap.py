@@ -29,10 +29,19 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
  marker=pathlib.Path('/var/lib/zlb-bootstrap/revision')
  unit=pathlib.Path('/etc/systemd/system/zlb-natd.service')
  target=pathlib.Path('/opt/zlb/zlb')
- token=pathlib.Path('/etc/zlb/token')
+ etc=pathlib.Path('/etc/zlb')
+ tls_modes={'tls.crt':0o644,'tls.key':0o600,'client-ca.crt':0o644}
+ if not set(p['tls'])<=set(tls_modes): raise ValueError('invalid TLS filename')
+ config={etc/'token':(p['token']+'\n',0o600)}
+ config.update({etc/name:(data,tls_modes[name]) for name,data in p['tls'].items()})
+ stale=[etc/name for name in tls_modes if name not in p['tls']]
+ modes={unit:0o644,marker:0o600,**{path:mode for path,(data,mode) in config.items()},
+  **{etc/name:mode for name,mode in tls_modes.items() if name not in p['tls']}}
  def healthy():
   return (marker.exists() and marker.read_text().strip()==revision and unit.exists()
-    and unit.read_text()==p['unit'] and token.exists() and token.read_text().strip()==p['token']
+    and unit.read_text()==p['unit']
+    and all(path.exists() and path.read_text()==data for path,(data,mode) in config.items())
+    and not any(path.exists() for path in stale)
     and all((target/name).exists() and (target/name).read_text()==data for name,data in p['files'].items())
     and subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode==0
     and all(shutil.which(x) for x in ('nft','ip')))
@@ -51,7 +60,7 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
   backup=pathlib.Path(directory)
   had_package=target.exists()
   if had_package: shutil.copytree(target,backup/'package')
-  saved={str(path):path.read_bytes() if path.exists() else None for path in (unit,token,marker)}
+  saved={path:path.read_bytes() if path.exists() else None for path in modes}
   running=subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode==0
   def write(path,data,mode):
    path=pathlib.Path(path);path.parent.mkdir(parents=True,exist_ok=True)
@@ -63,7 +72,8 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
    if target.exists(): shutil.rmtree(target)
    target.mkdir(parents=True,mode=0o755)
    for name,data in p['files'].items(): write(target/name,data.encode(),0o644)
-   write(token,p['token'].encode()+b'\n',0o600)
+   for path,(data,mode) in config.items(): write(path,data.encode(),mode)
+   for path in stale: path.unlink(missing_ok=True)
    write(unit,p['unit'].encode(),0o644)
    write('/etc/sysctl.d/90-zlb-forwarding.conf',b'net.ipv4.ip_forward=1\n',0o644)
    run('sysctl','-w','net.ipv4.ip_forward=1')
@@ -77,8 +87,8 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
    if target.exists(): shutil.rmtree(target)
    if had_package: shutil.copytree(backup/'package',target)
    for path,data in saved.items():
-    if data is None: pathlib.Path(path).unlink(missing_ok=True)
-    else: write(path,data,0o644 if path==str(unit) else 0o600)
+    if data is None: path.unlink(missing_ok=True)
+    else: write(path,data,modes[path])
    run('systemctl','daemon-reload')
    if running: run('systemctl','start','zlb-natd.service')
    raise
@@ -86,13 +96,19 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
 '''
 
 
-def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS):
+def unit(listen, port, ips, interface, node_cidr, backend_ports=NODE_PORTS, tls=False,
+         client_ca=False, allow_from=()):
     first,last=(int(x) for x in backend_ports)
     if not 1<=first<=last<=65535:
         raise ValueError('invalid backend port range')
+    if client_ca and not tls:
+        raise ValueError('client certificate verification requires TLS')
     args=['--listen',str(ipaddress.IPv4Address(listen)),'--port',str(port),
           '--public-interface',interface,'--node-cidr',str(ipaddress.IPv4Network(node_cidr)),
           '--backend-port-range',f'{first}-{last}']
+    if tls: args.extend(['--tls-cert','/etc/zlb/tls.crt','--tls-key','/etc/zlb/tls.key'])
+    if client_ca: args.extend(['--tls-client-ca','/etc/zlb/client-ca.crt'])
+    for network in allow_from: args.extend(['--allow-from',str(ipaddress.ip_network(network))])
     # Share the privileged daemon's exact validation before generating any shell/systemd input.
     from .addresses import Addresses
     validated=Addresses(None,interface,ips,'/nonexistent/zlb-bootstrap-journal')
@@ -126,7 +142,7 @@ WantedBy=multi-user.target
 
 class SSHBootstrap:
     def __init__(self, host, user, key_file, known_hosts, token_file, listen, port, ips, interface,
-                 node_cidr, ssh_port=22, backend_ports=NODE_PORTS):
+                 node_cidr, ssh_port=22, backend_ports=NODE_PORTS, tls_files=None, allow_from=()):
         ipaddress.IPv4Address(host)
         if not user or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in user):
             raise ValueError('invalid SSH user')
@@ -134,11 +150,17 @@ class SSHBootstrap:
             raise ValueError('invalid SSH/API port')
         self.host,self.user,self.key_file,self.known_hosts=host,user,key_file,known_hosts
         self.token_file,self.ssh_port=token_file,ssh_port
-        self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports)
+        # Local paths of the daemon's HTTPS material, keyed by their name under /etc/zlb.
+        self.tls_files=dict(tls_files or {})
+        if self.tls_files and not {'tls.crt','tls.key'}<=set(self.tls_files)<={'tls.crt','tls.key','client-ca.crt'}:
+            raise ValueError('TLS needs tls.crt and tls.key, optionally client-ca.crt')
+        self.unit=unit(listen,port,ips,interface,node_cidr,backend_ports,bool(self.tls_files),
+                       'client-ca.crt' in self.tls_files,allow_from)
 
     def payload(self):
         files={path.name:path.read_text() for path in Path(__file__).parent.glob('*.py')}
-        return dict(files=files,token=read_token(self.token_file),unit=self.unit)
+        tls={name:Path(path).read_text() for name,path in self.tls_files.items()}
+        return dict(files=files,token=read_token(self.token_file),unit=self.unit,tls=tls)
 
     def ensure(self):
         payload=self.payload()
@@ -181,16 +203,27 @@ def main(argv=None):
                         help="Daemon public IPv4 allowlist entry, optionally /prefix")
     parser.add_argument("--node-cidr", required=True)
     parser.add_argument("--backend-port-range", type=port_range, default=NODE_PORTS)
+    parser.add_argument("--tls-cert-file", help="Daemon HTTPS certificate chain; required for https")
+    parser.add_argument("--tls-key-file", help="Private key for --tls-cert-file")
+    parser.add_argument("--tls-client-ca-file", help="CA the daemon requires client certificates from")
+    parser.add_argument("--allow-from", action="append", default=[], type=ipaddress.ip_network,
+                        help="Restrict daemon API clients to this CIDR (repeatable)")
     args = parser.parse_args(argv)
     endpoint = urlparse(args.lb_node)
-    if endpoint.scheme != "http" or not endpoint.hostname:
-        parser.error("SSH bootstrap configures the native HTTP daemon; use a trusted private HTTP endpoint")
+    if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
+        parser.error("--lb-node must be an http:// or https:// URL")
+    tls_files = {name: path for name, path in (("tls.crt", args.tls_cert_file), ("tls.key", args.tls_key_file),
+                                               ("client-ca.crt", args.tls_client_ca_file)) if path}
+    if endpoint.scheme == "https" and not {"tls.crt", "tls.key"} <= set(tls_files):
+        parser.error("an https:// endpoint needs --tls-cert-file and --tls-key-file")
+    if endpoint.scheme == "http" and tls_files:
+        parser.error("TLS files require an https:// --lb-node")
     logging.basicConfig(level=logging.INFO)
     try:
         SSHBootstrap(args.ssh_host or endpoint.hostname, args.ssh_user, args.key_file,
                      args.known_hosts_file, args.token_file, endpoint.hostname, endpoint.port or 9808,
                      args.ip, args.public_interface, args.node_cidr, args.ssh_port,
-                     args.backend_port_range).ensure()
+                     args.backend_port_range, tls_files, args.allow_from).ensure()
     except Exception:
         LOG.exception("load balancer node bootstrap failed")
         return 1
