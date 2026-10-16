@@ -129,7 +129,8 @@ Run `python3 -m zlb.controller --help` for the CLI.
 - `--node-cidr` must describe node InternalIPs, not Pod or Service CIDRs.
 - `--interval` defaults to 5 seconds with jitter and must be at least 1 second.
 - `--resync` (default 600 seconds, minimum 30) sets how often the watch caches relist
-  Services, Nodes and EndpointSlices from scratch. The ServiceAccount needs `watch` on them.
+  Services, Nodes and EndpointSlices from scratch. Reconciliation continues from the
+  current cache while a resync runs. The ServiceAccount needs `watch` on them.
 - `--ca-file` configures HTTPS trust; `--client-cert`/`--client-key` present a client
   certificate for mutual TLS; `--allow-private-http` explicitly permits HTTP.
 
