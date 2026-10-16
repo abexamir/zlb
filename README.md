@@ -55,7 +55,7 @@ scarce ones go where you decide.
 | --- | --- | --- | --- | --- |
 | Who answers for the public IP | a node (L2 leader) or all nodes (BGP) | a node (L2 Announcements) or BGP Control Plane | a node (ARP leader) or BGP | **one machine outside the cluster** |
 | Network requirement | shared L2 segment or a BGP router | shared L2 segment or a BGP router | shared L2 segment or a BGP router | **IPs routed to that machine** |
-| Nodes reachable from the internet | yes | yes | yes | **no** |
+| Nodes reachable from the routing domain | yes | yes | yes | **no** |
 | Clients connect to | `IP:servicePort` | `IP:servicePort` | `IP:servicePort` | `IP:nodePort`, or reserved literal ports |
 | Same port on one IP (two `:5432`) | no, needs a second IP | no, needs a second IP | no, needs a second IP | **yes** |
 | IP sharing | opt-in annotation | opt-in sharing key | shared address | **default** |
@@ -64,10 +64,10 @@ scarce ones go where you decide.
 | Failover | yes (L2 leader election, BGP ECMP) | yes (L2 leases, BGP) | yes (leader election, BGP) | not yet ([planned](docs/internals.md#future-high-availability)) |
 | Extra cost | speakers on nodes | requires Cilium | daemons on nodes | one machine, one NAT hop |
 
-MetalLB, Cilium and kube-vip suit networks where nodes may own public addresses. zlb suits
-networks where they must not, or cannot. [Cilium LB IPAM](https://docs.cilium.io/en/stable/network/lb-ipam/)
-only allocates; Cilium's separate L2 Announcements or BGP Control Plane advertises. Let
-exactly one implementation handle unclassified LoadBalancer Services.
+MetalLB, Cilium and kube-vip all require the VIPs to be reachable from your network via L2 or
+BGP, but that does not require every worker node to have a public Internet-routable IP.
+`zlb` targets the distinct model where public IPs are intentionally routed to one external
+machine and the cluster stays off the public Internet.
 
 ## Features
 
