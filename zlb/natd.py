@@ -7,6 +7,8 @@ import logging
 import os
 from pathlib import Path
 import re
+import socket
+import struct
 import subprocess
 import threading
 
@@ -173,6 +175,34 @@ def cleanup_reason(table, runtime=Path("/run/zlb"), environ=None):
     return None
 
 
+def generation():
+    """The nftables ruleset generation of this network namespace, or None if unreadable.
+
+    The kernel advances it on every committed ruleset change, in any table and by any tool,
+    but not for counter updates. An unchanged generation therefore proves the verified table
+    is untouched without listing it, which takes seconds for large tables."""
+    nftables, get_generation, new_generation, request = 10, 16, 15, 1
+    try:
+        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 12) as connection:  # NETLINK_NETFILTER
+            connection.settimeout(2)
+            # nlmsghdr, then nfgenmsg (family, version, resource id).
+            connection.send(struct.pack("=IHHII", 20, nftables << 8 | get_generation, request, 1, 0)
+                            + struct.pack("=BBH", socket.AF_UNSPEC, 0, 0))
+            reply = connection.recv(4096)
+        length, kind = struct.unpack_from("=IH", reply)
+        offset = 20
+        while kind == nftables << 8 | new_generation and offset + 4 <= min(length, len(reply)):
+            size, attribute = struct.unpack_from("=HH", reply, offset)
+            if size < 4:
+                break
+            if attribute & 0x7FFF == 1 and size >= 8:  # NFTA_GEN_ID, big-endian u32
+                return struct.unpack_from(">I", reply, offset + 4)[0]
+            offset += (size + 3) & ~3
+    except (OSError, struct.error):
+        pass
+    return None
+
+
 def stable(value):
     if isinstance(value, dict):
         return {key: stable(item) for key, item in value.items()
@@ -198,7 +228,7 @@ class Applier:
         if not self.allowed_ips:
             raise ValueError("public IP allowlist cannot be empty")
         self.lock = threading.Lock()
-        self.current_digest, self.last_fingerprint = None, None
+        self.current_digest, self.last_fingerprint, self.last_generation = None, None, None
 
     def command(self, *args, input=None):
         return subprocess.run(args, input=input, text=True, check=True,
@@ -218,6 +248,9 @@ class Applier:
     def text(self):
         """The owned table as reloadable text, taken only when a commit may need rolling back."""
         return self.command("nft", "-s", "list", "table", "ip", self.table)
+
+    def generation(self):
+        return generation()
 
     def counters(self):
         data = json.loads(self.command("nft", "-j", "list", "counters", "table", "ip", self.table))
@@ -275,11 +308,17 @@ class Applier:
                                self.backend_ports)
         revision = digest(state)
         with self.lock:
-            previous = self.snapshot()
             before_addresses = self.addresses.owned.copy()
-            if previous and self.current_digest == revision and previous["fingerprint"] == self.last_fingerprint:
-                # The verified table is unchanged and has not drifted: the controller re-sends
-                # its full state every tick, so skip rendering, checking and committing.
+            # The controller re-sends its full state every tick. When it is the verified state
+            # and the table has not drifted, only re-assert the addresses. An unchanged ruleset
+            # generation proves the latter without listing the table; after any other ruleset
+            # change, compare the listed table with the verified one.
+            generation = self.generation() if self.current_digest == revision else None
+            unchanged = generation is not None and generation == self.last_generation
+            previous = None if unchanged else self.snapshot()
+            if unchanged or (previous and self.current_digest == revision
+                             and previous["fingerprint"] == self.last_fingerprint):
+                self.last_generation = generation
                 try:
                     self.addresses.add()
                     self.addresses.retire()
@@ -295,11 +334,13 @@ class Applier:
             try:
                 self.addresses.add()
                 self.install(candidate, previous)
+                # Read before the readback, so a later change by anyone moves it on.
+                generation = self.generation()
                 actual = self.snapshot()
                 self.verify(state, actual)
                 self.addresses.retire()
             except Exception:
-                self.current_digest, self.last_fingerprint = None, None
+                self.current_digest, self.last_fingerprint, self.last_generation = None, None, None
                 self.restore_addresses(before_addresses)
                 try:
                     now = self.snapshot()
@@ -314,6 +355,7 @@ class Applier:
                     LOG.exception("LOAD BALANCER NODE ROLLBACK FAILED; operator attention required")
                 raise
             self.current_digest, self.last_fingerprint = revision, actual["fingerprint"]
+            self.last_generation = generation
             LOG.info("applied revision=%s listeners=%d", revision, len(state["listeners"]))
             return revision
 
