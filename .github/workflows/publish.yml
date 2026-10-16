@@ -134,6 +134,7 @@ jobs:
           DIGEST: ${{ needs.publish.outputs.digest }}
           CHART: ${{ needs.publish.outputs.chart }}
         run: |
-          notes=$(printf 'Image: `%s@%s`\nChart: `oci://%s`\n' "$IMAGE" "$DIGEST" "$CHART")
+          notes="Image: \`$IMAGE@$DIGEST\`
+          Chart: \`oci://$CHART\`"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
             --title "zlb $TAG" --notes "$notes"
