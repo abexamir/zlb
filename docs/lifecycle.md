@@ -331,7 +331,7 @@ nft -s list table ip zlb
 ```
 
 An existing table must have a `zlb:v2:` or `zlb:v3:` ownership comment. Otherwise the daemon refuses to
-touch it. If no table exists, it applies an empty v2 snapshot, creating the base chains
+touch it. If no table exists, it applies an empty v3 snapshot, creating the base chains
 and claiming configured addresses. If a table exists, it leaves it until the next snapshot.
 Then it listens on `10.0.0.3:9808`; `/healthz` reports process liveness only.
 
