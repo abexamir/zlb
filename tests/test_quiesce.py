@@ -80,6 +80,22 @@ class QuiesceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "still running: zlb-controller-pod"):
             quiesce(kube, "zlb-system", "zlb-controller", "zlb-controller-bootstrap", timeout=0.05, poll=0)
 
+    def test_own_running_pod_never_blocks_quiesce(self):
+        # Review finding: the hook pod once carried the controller selector label and waited
+        # for itself until timeout. Even if a selector matches it, its own pod is skipped.
+        class SelfMatching(FakeKube):
+            def list_all(self, path, **params):
+                pods = super().list_all(path, **params)
+                if not path.endswith("/jobs"):
+                    pods = pods + [{"metadata": {"name": "zlb-controller-quiesce-x"}, "status": {"phase": "Running"}}]
+                return pods
+        kube = SelfMatching(deployment(["--bootstrap-key-file=/k"]), cronjob=False)
+        quiesce(kube, "zlb-system", "zlb-controller", "zlb-controller-bootstrap", timeout=5, poll=0,
+                own_pod="zlb-controller-quiesce-x")
+        with self.assertRaisesRegex(RuntimeError, "zlb-controller-quiesce-x"):
+            quiesce(SelfMatching(deployment(["--bootstrap-key-file=/k"]), cronjob=False), "zlb-system",
+                    "zlb-controller", "zlb-controller-bootstrap", timeout=0.05, poll=0)
+
     def test_orphaned_bootstrap_pod_is_awaited_without_its_job(self):
         # A retried hook: the Job is already deleted but its pod is still terminating.
         kube = FakeKube(cronjob=False)
