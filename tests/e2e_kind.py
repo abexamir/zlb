@@ -85,7 +85,8 @@ def setup():
     run("docker", "run", "-d", "--name", LB, "--privileged", "--network", "kind", "--entrypoint", "sleep",
         NAT_IMAGE, "infinity")
     lb_ip = run("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", LB)
-    for command in ("sysctl -w net.ipv4.ip_forward=1", "ip netns add client",
+    lb("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward")  # the slim image has no sysctl
+    for command in ("ip netns add client",
                     "ip link add pub0 type veth peer name cli0", "ip link set cli0 netns client",
                     "ip addr add 192.0.2.1/24 dev pub0", "ip link set pub0 up",
                     f"ip netns exec client ip addr add {CLIENT}/24 dev cli0",
