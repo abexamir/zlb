@@ -508,7 +508,8 @@ next is fetched. EndpointSlices are reduced to their eligible node names and por
 of 20,000 slices peaks at about 19 MiB, against about 158 MiB when full pages were held. A
 tick reads the caches without API calls. It fails without pushing anything unless all three
 caches hold a complete list and have a watch open from it; readiness is withdrawn as soon as
-a watch fails or expires, or a relist starts, and returns only when the next watch opens. Objects
+a watch fails or expires, and returns only when the next watch opens. A planned `--resync`
+relist follows a watch that ended cleanly, so the cache keeps serving while it runs. Objects
 returned by the controller's own patches are written through to the cache. The caches are
 not one atomic cross-resource Kubernetes transaction; a later tick converges concurrent
 changes. The interval is five seconds by default with ±10% jitter, after the work finishes.
@@ -601,10 +602,13 @@ duplicate `(IP, protocol, public port)` listeners, and its API port or extra res
 Under a thread lock, apply executes this order:
 
 1. Validate and normalize state.
-2. Read back only the owned table (`nft -j -s list table`) and remember owned addresses.
-3. If the digest equals the last acknowledged one and the table's fingerprint has not
-   drifted, re-assert interface addresses and acknowledge. Nothing is rendered, checked or
-   committed; this is the usual case, because the controller re-sends its state every tick.
+2. If the digest equals the last acknowledged one and the kernel's nftables ruleset
+   generation (read over netlink) has not moved since that apply was verified, re-assert
+   interface addresses and acknowledge without listing anything. This is the usual case,
+   because the controller re-sends its state every tick.
+3. Otherwise read back only the owned table (`nft -j -s list table`) and remember owned
+   addresses. If the digest matches and the table's fingerprint has not drifted (another
+   table changed), acknowledge the same way.
 4. Otherwise read the per-listener counters, render the candidate with those values, and
    validate the entire transaction with `nft --check --file -`.
 5. Save the current table as text for rollback, add missing configured public addresses and

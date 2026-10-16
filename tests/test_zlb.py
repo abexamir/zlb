@@ -235,6 +235,11 @@ class ControllerTests(unittest.TestCase):
         controller.reconcile()
         self.assertNotIn("annotate", [action for action, _ in kube.actions], "a deleted Service is not touched")
 
+    def test_missing_node_port_names_the_cause(self):
+        svc = service()
+        del svc["spec"]["ports"][0]["nodePort"]
+        self.assertIn("allocateLoadBalancerNodePorts", plan([svc]).errors["web"])
+
     def test_api_read_failure_does_not_push(self):
         controller, kube, lb_node = self.controller([service()])
         kube.fail_nodes = True

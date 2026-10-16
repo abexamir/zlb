@@ -122,7 +122,8 @@ class BootstrapCommandTests(unittest.TestCase):
     def test_https_endpoint_requires_matching_tls_files(self):
         for args in (self.args('https://10.0.0.3:9808'),
                      self.args()+['--tls-cert-file','/c','--tls-key-file','/k'],
-                     self.args('ftp://10.0.0.3')):
+                     self.args('ftp://10.0.0.3'),
+                     self.args('https://10.0.0.3')+['--tls-cert-file','/c','--tls-key-file','/k']):
             with self.subTest(args=args),self.assertRaises(SystemExit),patch('sys.stderr'):
                 main(args)
         with patch('zlb.bootstrap.SSHBootstrap') as bootstrap:

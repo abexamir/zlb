@@ -120,10 +120,16 @@ class Reflector:
                 delay = min(delay * 2, 30)
 
     def relist(self):
-        """Replace the cache from a complete list. The cache counts as synced again only once
-        a watch from the list's resourceVersion is open (see follow)."""
-        self.synced.clear()
-        items, version = self.kube.list_versioned(self.path, self.transform)
+        """Replace the cache from a complete list. After an error or an expired watch, run()
+        has already cleared `synced`, and the cache counts as synced again only once a watch
+        from the list's resourceVersion is open (see follow). A planned resync follows a watch
+        that ended cleanly, so the cache stays complete and keeps serving while it relists;
+        otherwise every resync would fail a tick and mark the controller not Ready."""
+        try:
+            items, version = self.kube.list_versioned(self.path, self.transform)
+        except Exception:
+            self.synced.clear()
+            raise
         replacement = {item["metadata"]["uid"]: item for item in items}
         with self.lock:
             self.items = replacement
