@@ -3,7 +3,6 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from urllib.parse import urlparse
 import random
 import ssl
 import time
@@ -12,7 +11,7 @@ from urllib.request import Request, urlopen
 from .http_api import read_token
 from .compiler import active, compile_state
 from .kube import Kubernetes
-from .model import FINALIZER, NODE_PORTS, canonical, digest, port_range
+from .model import FINALIZER, canonical, digest
 from .pools import PoolConfig
 
 LOG = logging.getLogger(__name__)
@@ -92,15 +91,6 @@ def main():
     parser.add_argument("--interval", type=float, default=5)
     parser.add_argument("--allow-private-http", action="store_true",
                         help="Allow plaintext bearer token on an explicitly trusted private network")
-    parser.add_argument("--bootstrap-key-file")
-    parser.add_argument("--bootstrap-known-hosts-file")
-    parser.add_argument("--bootstrap-ssh-host")
-    parser.add_argument("--bootstrap-ssh-user", default="root")
-    parser.add_argument("--bootstrap-ssh-port", type=int, default=22)
-    parser.add_argument("--bootstrap-interface")
-    parser.add_argument("--bootstrap-ip", action="append")
-    parser.add_argument("--bootstrap-backend-port-range", type=port_range, default=NODE_PORTS,
-                        help="NodePort range the bootstrapped daemon accepts as backends")
     parser.add_argument("--ready-file")
     args = parser.parse_args()
     if not args.lb_node.startswith("https://") and not (args.allow_private_http and args.lb_node.startswith("http://")):
@@ -109,31 +99,15 @@ def main():
         parser.error("interval must be at least one second")
     logging.basicConfig(level=logging.INFO)
     controller = Controller(Kubernetes(), LoadBalancerNode(args.lb_node, args.token_file, args.ca_file), args.ip, args.node_cidr, args.pool_config)
-    bootstrap = None
-    if args.bootstrap_key_file:
-        if not (args.bootstrap_known_hosts_file and args.bootstrap_interface and args.bootstrap_ip):
-            parser.error("SSH bootstrap requires known hosts, public interface and independent public IP allowlist")
-        from .bootstrap import SSHBootstrap
-        endpoint = urlparse(args.lb_node)
-        if endpoint.scheme != "http":
-            parser.error("SSH bootstrap configures the native HTTP daemon; use a trusted private HTTP endpoint")
-        bootstrap = SSHBootstrap(args.bootstrap_ssh_host or endpoint.hostname, args.bootstrap_ssh_user,
-            args.bootstrap_key_file, args.bootstrap_known_hosts_file, args.token_file,
-            endpoint.hostname, endpoint.port or 9808, args.bootstrap_ip, args.bootstrap_interface,
-            args.node_cidr, args.bootstrap_ssh_port, backend_ports=args.bootstrap_backend_port_range)
     ready = Path(args.ready_file) if args.ready_file else None
     while True:
         try:
-            if bootstrap:
-                bootstrap.ensure()
             controller.reconcile()
             if ready:
                 ready.write_text(str(time.time()))
         except Exception:
             if ready:
                 ready.unlink(missing_ok=True)
-            if bootstrap:
-                bootstrap.invalidate()
             LOG.exception("reconcile failed; preserving last acknowledged load balancer node state")
         time.sleep(args.interval * random.uniform(0.9, 1.1))
 

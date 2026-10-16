@@ -40,10 +40,17 @@ Deployments or several controller processes using the same API.
 
 ## Optional host provisioning
 
-With explicit SSH bootstrap configuration, the controller verifies the VM host key, installs
-required packages and the daemon, and maintains its declared revision. API tokens and SSH
-private keys travel through mounted Secrets and encrypted SSH stdin, never command arguments.
-Only a verified apply makes the controller Ready. VM creation, routing and firewall policy
+With explicit SSH bootstrap configuration, a one-shot Helm hook Job (and optionally a
+CronJob) verifies the VM host key, installs required packages and the daemon, and maintains
+its declared revision. The bootstrap pod holds the root-equivalent SSH key but no Kubernetes
+API token; the controller holds API access but no SSH key. API tokens and SSH private keys
+travel through mounted Secrets and encrypted SSH stdin, never command arguments. Only a
+verified apply makes the controller Ready.
+
+RBAC cannot restrict `patch services` to particular fields. On Kubernetes 1.30+ the chart
+installs a ValidatingAdmissionPolicy that lets the controller's ServiceAccount add or remove
+only its own `zlb.zarrino.tech/cleanup` finalizer. Status writes go through the
+`services/status` subresource, which cannot change spec or metadata. VM creation, routing and firewall policy
 remain infrastructure responsibilities. Bootstrap is optional for preprovisioned load balancer nodes.
 
 ## Rule application
