@@ -500,10 +500,12 @@ GET /api/v1/nodes?limit=500[&continue=...]                     then ?watch=1&res
 GET /apis/discovery.k8s.io/v1/endpointslices?limit=500[&...]   then ?watch=1&resourceVersion=...
 ```
 
-The caches keep only the fields the compiler reads. EndpointSlices are reduced to their
-eligible node names and ports, which takes about 22 MiB for 20,000 slices compared with
-about 141 MiB for full objects. A tick reads the caches without API calls, and fails without
-pushing anything unless all three reflect a complete list and an unbroken watch. Objects
+The caches keep only the fields the compiler reads, and each list page is trimmed before the
+next is fetched. EndpointSlices are reduced to their eligible node names and ports: a relist
+of 20,000 slices peaks at about 19 MiB, against about 158 MiB when full pages were held. A
+tick reads the caches without API calls. It fails without pushing anything unless all three
+caches hold a complete list and have a watch open from it; readiness is withdrawn as soon as
+a watch fails or expires, or a relist starts, and returns only when the next watch opens. Objects
 returned by the controller's own patches are written through to the cache. The caches are
 not one atomic cross-resource Kubernetes transaction; a later tick converges concurrent
 changes. The interval is five seconds by default with ±10% jitter, after the work finishes.
