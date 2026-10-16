@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from zlb.bootstrap import SSHBootstrap,main,unit
+from zlb.bootstrap import SSHBootstrap,main,sandbox,unit
 from zlb.model import digest
 
 
@@ -72,6 +72,24 @@ class BootstrapTests(unittest.TestCase):
             unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',client_ca=True)
         with self.assertRaises(ValueError):
             unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',allow_from=['not-a-cidr'])
+
+    def test_daemon_runs_unprivileged_and_sandboxed(self):
+        text=self.bootstrap.unit
+        for line in ('User=zlb-natd','AmbientCapabilities=CAP_NET_ADMIN\n','CapabilityBoundingSet=CAP_NET_ADMIN\n',
+                     'NoNewPrivileges=true','ProtectSystem=strict','SystemCallFilter=@system-service',
+                     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK'):
+            self.assertIn(line,text)
+        self.assertNotIn('CAP_NET_RAW',text)
+        privileged=unit('10.0.0.3',443,['198.51.100.10'],'nic1','10.0.0.0/24')
+        self.assertIn('AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE',privileged)
+        example=(Path(__file__).parents[1]/'examples/systemd/zlb-natd.service').read_text()
+        self.assertIn(sandbox(['CAP_NET_ADMIN']),example)
+
+    def test_host_guard_flags(self):
+        self.assertNotIn('--allow-foreign-forwarding',self.bootstrap.unit)
+        text=unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',allow_foreign_forwarding=True,isolate_public=True)
+        self.assertIn('--allow-foreign-forwarding',text)
+        self.assertIn('--isolate-public-ips',text)
 
     def test_cleanup_and_daemon_use_same_allowlist(self):
         text=self.bootstrap.unit

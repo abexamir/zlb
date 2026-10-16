@@ -11,4 +11,8 @@ the key and the namespace's Secrets, restrict the daemon API to trusted sources 
 HTTPS, ideally with client certificates, whenever the path is not fully private. See
 [securing the daemon API](docs/installation.md#securing-the-daemon-api).
 
+The daemon runs as the unprivileged `zlb-natd` user with only `CAP_NET_ADMIN`, and by
+default refuses to forward unsolicited traffic from its public interface into the node
+network.
+
 See the [lifecycle guide](docs/lifecycle.md) for ownership, validation and rollback behavior.

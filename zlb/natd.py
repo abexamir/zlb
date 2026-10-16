@@ -22,7 +22,28 @@ def table_name(value):
     return value
 
 
-def render(state, node_cidr, table="zlb", allowed_ips=None):
+def host_guards(public_interface, ips, isolate=False):
+    """Forward and input rules protecting the load balancer node itself.
+
+    With IPv4 forwarding on, the node would route anything a neighbour on the public segment
+    sends it, including straight into the node CIDR. The forward guard drops new or invalid
+    connections arriving on the public interface unless they were DNATed (zlb listeners and
+    any DNAT the operator configured). The optional input isolation keeps local services such
+    as sshd off the published IPs: only replies and ping reach the node there."""
+    forward, local = [], []
+    if public_interface:
+        interface = f'iifname "{public_interface}"'
+        forward = [f"{interface} ct state invalid,untracked counter drop",
+                   f"{interface} ct state new ct status & dnat == 0 counter drop"]
+    if isolate:
+        addresses = "ip daddr { " + ", ".join(ips) + " }"
+        local = [f"{addresses} ct state established,related accept",
+                 f"{addresses} icmp type echo-request accept",
+                 f"{addresses} counter drop"]
+    return forward, local
+
+
+def render(state, node_cidr, table="zlb", allowed_ips=None, public_interface=None, isolate=False):
     """A complete owned table, committed atomically across NAT and filtering hooks."""
     table_name(table)
     node_cidr = str(ipaddress.IPv4Network(node_cidr))
@@ -53,13 +74,15 @@ def render(state, node_cidr, table="zlb", allowed_ips=None):
     for ip in ips:
         established.append(f"ct state established,related ct status dnat ct original ip daddr {ip} "
                            f"ct reply ip saddr {node_cidr} counter accept")
+    forward_guard, input_guard = host_guards(public_interface, ips, isolate)
     def chain(name, declaration, rules):
         return f"chain {name} {{\n    {declaration}\n" + "".join(f"    {r};\n" for r in rules) + "}\n"
     return (f'table ip {table} {{\ncomment "zlb:v{VERSION}:{revision}";\n'
             + "\n".join(destinations) + "\n"
             + chain("prerouting", "type nat hook prerouting priority -110; policy accept;", pre)
-            + chain("forward", "type filter hook forward priority -10; policy accept;", established + filtering)
-            + chain("input", "type filter hook input priority -10; policy accept;", filtering)
+            + chain("forward", "type filter hook forward priority -10; policy accept;",
+                    established + forward_guard + filtering)
+            + chain("input", "type filter hook input priority -10; policy accept;", filtering + input_guard)
             + "}\n")
 
 
@@ -74,13 +97,16 @@ def stable(value):
 
 class Applier:
     def __init__(self, allowed_ips, node_cidr, interface, state_dir="/var/lib/zlb",
-                 forbidden_ports=(), table="zlb", backend_ports=NODE_PORTS):
+                 forbidden_ports=(), table="zlb", backend_ports=NODE_PORTS, guard_forwarding=True,
+                 isolate_public=False):
         self.table = table_name(table)
         self.node_cidr = str(ipaddress.IPv4Network(node_cidr))
         self.forbidden_ports = forbidden_ports
         self.backend_ports = backend_ports
         self.addresses = Addresses(self.command, interface, allowed_ips, Path(state_dir) / f"{table}-addresses.json")
         self.allowed_ips = sorted(self.addresses.desired)
+        self.guard_interface = interface if guard_forwarding else None
+        self.isolate_public = isolate_public
         if not self.allowed_ips:
             raise ValueError("public IP allowlist cannot be empty")
         self.lock = threading.Lock()
@@ -124,7 +150,8 @@ class Applier:
         objects = actual["data"]["nftables"]
         nonempty = sum(bool(item["backends"]) for item in state["listeners"])
         expected_rules = (len(self.allowed_ips) + 2 * len(state["listeners"]) + 4 * nonempty
-                          + sum(len(item["backends"]) for item in state["listeners"]))
+                          + sum(len(item["backends"]) for item in state["listeners"])
+                          + sum(map(len, host_guards(self.guard_interface, self.allowed_ips, self.isolate_public))))
         if sum("rule" in item for item in objects) != expected_rules:
             raise RuntimeError("nftables rule count differs from desired state")
         for item in objects:
@@ -149,7 +176,8 @@ class Applier:
         state = validate_state(state, self.allowed_ips, self.node_cidr, self.forbidden_ports,
                                self.backend_ports)
         revision = digest(state)
-        candidate = render(state, self.node_cidr, self.table, self.allowed_ips)
+        candidate = render(state, self.node_cidr, self.table, self.allowed_ips, self.guard_interface,
+                           self.isolate_public)
         with self.lock:
             previous = self.snapshot()
             before_addresses = self.addresses.owned.copy()
@@ -212,6 +240,11 @@ def main():
                         help="Accept API connections only from this CIDR (repeatable; default any)")
     parser.add_argument("--max-connections", type=int, default=16,
                         help="Concurrent API connections; extra connections are closed")
+    parser.add_argument("--allow-foreign-forwarding", action="store_true",
+                        help="Do not drop new forwarded connections from the public interface that "
+                             "were not DNATed (only if this VM also routes other public traffic)")
+    parser.add_argument("--isolate-public-ips", action="store_true",
+                        help="Drop traffic to the public IPs that is not a listener, a reply or ping")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
     if not args.cleanup and not args.token_file:
@@ -224,7 +257,8 @@ def main():
         parser.error("--max-connections must be at least 1")
     logging.basicConfig(level=logging.INFO)
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
-                      args.reserved_port + [args.port], args.table, args.backend_port_range)
+                      args.reserved_port + [args.port], args.table, args.backend_port_range,
+                      not args.allow_foreign_forwarding, args.isolate_public_ips)
     token = None if args.cleanup else read_token(args.token_file)
     tls = None
     if args.tls_cert and not args.cleanup:

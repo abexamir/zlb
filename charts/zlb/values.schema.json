@@ -71,6 +71,12 @@
             "type": "string",
             "pattern": "^[0-9a-fA-F.:]+/[0-9]+$"
           }
+        },
+        "allowForeignForwarding": {
+          "type": "boolean"
+        },
+        "isolatePublicIPs": {
+          "type": "boolean"
         }
       }
     },
