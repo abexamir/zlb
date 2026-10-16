@@ -66,6 +66,7 @@ spec:
             {{- range .Values.bootstrap.publicIPs }}
             - {{ printf "--bootstrap-ip=%s" . | quote }}
             {{- end }}
+            - {{ printf "--bootstrap-backend-port-range=%s" .Values.bootstrap.backendPortRange | quote }}
             {{- end }}
           readinessProbe:
             exec:

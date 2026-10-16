@@ -149,6 +149,13 @@ def main():
             assert all(x.split()[1] == CLIENT for x in responses), (proto, responses)
             assert Counter(x.split()[0] for x in responses) == {"10.20.0.11": 4, "10.20.0.12": 4}, (proto, responses)
             print(f"PASS: {proto} same-port forwarding, real source IP, even round robin", flush=True)
+        accepted = a.snapshot()["fingerprint"]
+        exposed = copy.deepcopy(state)
+        exposed["listeners"][0]["backends"] = [{"ip": "10.20.0.11", "port": 22}]
+        try: a.apply(exposed); raise AssertionError("non-NodePort backend accepted")
+        except ValueError: pass
+        assert a.snapshot()["fingerprint"] == accepted
+        print("PASS: backends outside the NodePort range are rejected before any change", flush=True)
         held = subprocess.Popen(["ip", "netns", "exec", "zlb-client", "python3", "-c", CLIENT_CODE, "TCP"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(held)
