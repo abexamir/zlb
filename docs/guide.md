@@ -31,7 +31,7 @@ through it. It never joins Kubernetes.
 
 | Component | Requirement | Verified in CI | Verified manually |
 | --- | --- | --- | --- |
-| Kubernetes | NodePorts and discovery/v1 EndpointSlices (1.21+). 1.30+ adds `ipMode: Proxy` and the `rbac.restrictServiceWrites` admission policy; older API servers drop or skip both. | | API servers 1.29, 1.34 |
+| Kubernetes | NodePorts and discovery/v1 EndpointSlices (1.21+). 1.30+ adds `ipMode: Proxy` and the `rbac.restrictServiceWrites` admission policy; older API servers drop or skip both. | 1.34, 1.37 (kind, end to end) | API servers 1.29, 1.34 |
 | Helm | 3.19+ or a compatible Helm 4 | 3.19 | |
 | Controller | the published image, or Python 3.11+ | Python 3.11, 3.13, 3.14 | |
 | Load balancer node | Linux with IPv4 forwarding, nftables, iproute2, Python 3.11+; systemd recommended | Debian 13, nftables 1.1 | Ubuntu 24.04, nftables 1.0.9 |

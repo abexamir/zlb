@@ -9,19 +9,30 @@ permissions:
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
+env:
+  COSIGN: github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
+  GOTOOLCHAIN: auto
 jobs:
   validate:
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/ci.yml  # zizmor: ignore[self-repository] standard local reusable-workflow call
     permissions:
       contents: read
   publish:
     needs: validate
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
+      id-token: write  # keyless cosign signatures
+    outputs:
+      image: ${{ steps.version.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      chart: ${{ steps.chart.outputs.reference }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Resolve artifact versions
         id: version
         env:
@@ -67,12 +78,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.19.0
       - name: Package and publish matching OCI chart
+        id: chart
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ steps.version.outputs.image }}
@@ -84,9 +96,45 @@ jobs:
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           python3 scripts/package_chart.py --output dist --version "$CHART_VERSION" \
             --image-repository "$IMAGE" --image-tag "$IMAGE_TAG" --image-digest "$IMAGE_DIGEST"
-          helm push "dist/zlb-$CHART_VERSION.tgz" "$CHART_REGISTRY"
+          helm push "dist/zlb-$CHART_VERSION.tgz" "$CHART_REGISTRY" 2>&1 | tee push.log
+          chart_digest=$(sed -n 's/^Digest: //p' push.log)
+          test -n "$chart_digest"
+          echo "reference=${CHART_REGISTRY#oci://}/zlb@$chart_digest" >> "$GITHUB_OUTPUT"
+      - name: Sign the image and chart (keyless)
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          CHART: ${{ steps.chart.outputs.reference }}
+          CHART_VERSION: ${{ steps.version.outputs.chart_version }}
+        run: |
+          go install "$COSIGN"
+          cosign="$(go env GOPATH)/bin/cosign"
+          "$cosign" sign --yes "$IMAGE@$IMAGE_DIGEST"
+          "$cosign" sign --yes "$CHART"
           {
             echo "### Published artifacts"
-            echo "Image: \`$IMAGE@$IMAGE_DIGEST\`"
-            echo "Chart: \`$CHART_REGISTRY/zlb:$CHART_VERSION\`"
+            echo "Image: \`$IMAGE@$IMAGE_DIGEST\` (SBOM and provenance attached)"
+            echo "Chart: \`oci://${CHART%@*}:$CHART_VERSION\` (\`$CHART\`)"
+            echo "Both are signed by this workflow; see CONTRIBUTING.md to verify."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          CHART: ${{ needs.publish.outputs.chart }}
+        run: |
+          notes="Image: \`$IMAGE@$DIGEST\`
+          Chart: \`oci://$CHART\`"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "zlb $TAG" --notes "$notes"
