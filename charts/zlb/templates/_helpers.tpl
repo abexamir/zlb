@@ -9,6 +9,13 @@ app: {{ include "zlb.fullname" . }}
 {{- end -}}
 {{- define "zlb.labels" -}}
 {{ include "zlb.selectorLabels" . }}
+{{ include "zlb.commonLabels" . }}
+{{- end -}}
+{{/*
+Labels for every pod except the controller's. They must never match the controller
+selector: the quiesce hook waits for pods matching a legacy controller's selector.
+*/}}
+{{- define "zlb.commonLabels" -}}
 app.kubernetes.io/name: {{ include "zlb.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
@@ -26,7 +33,7 @@ API credentials; the long-running controller holds API credentials but no SSH ke
 {{- $repository := required "image.repository is required" .Values.image.repository -}}
 metadata:
   labels:
-    {{- include "zlb.labels" . | nindent 4 }}
+    {{- include "zlb.commonLabels" . | nindent 4 }}
     app.kubernetes.io/component: bootstrap
 spec:
   restartPolicy: Never
