@@ -196,9 +196,10 @@ jobs:
           sudo install gitleaks /usr/local/bin/gitleaks
       - run: gitleaks git . --redact
 
-  # The single status to require in branch protection.
+  # The single status to require in branch protection. A run cancelled because a newer push
+  # superseded it reports nothing here instead of a failure; the newer run decides.
   ci-ok:
-    if: always()
+    if: ${{ !cancelled() }}
     needs: [lint, unit, coverage, chart-and-docs, image, nat, e2e, secrets]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
