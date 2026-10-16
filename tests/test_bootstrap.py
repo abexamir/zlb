@@ -54,6 +54,25 @@ class BootstrapTests(unittest.TestCase):
         for invalid in ((0,10),(32767,30000),(1,65536)):
             with self.assertRaises(ValueError):unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',invalid)
 
+    def test_tls_material_and_api_allowlist_are_installed(self):
+        for name in ('tls.crt','tls.key','ca.crt'):(self.root/name).write_text(name+' PEM')
+        files={'tls.crt':self.root/'tls.crt','tls.key':self.root/'tls.key','client-ca.crt':self.root/'ca.crt'}
+        bootstrap=SSHBootstrap('10.0.0.3','root',self.root/'key',self.root/'hosts',self.root/'token','10.0.0.3',
+            9808,['198.51.100.10/32'],'nic1','10.0.0.0/24',tls_files=files,allow_from=['10.0.0.0/24'])
+        for flag in ('--tls-cert /etc/zlb/tls.crt --tls-key /etc/zlb/tls.key',
+                     '--tls-client-ca /etc/zlb/client-ca.crt','--allow-from 10.0.0.0/24'):
+            self.assertIn(flag,bootstrap.unit)
+        self.assertEqual(bootstrap.payload()['tls'],{'tls.crt':'tls.crt PEM','tls.key':'tls.key PEM','client-ca.crt':'ca.crt PEM'})
+        self.assertEqual(self.bootstrap.payload()['tls'],{})
+        self.assertNotIn('--tls',self.bootstrap.unit)
+        with self.assertRaises(ValueError):
+            SSHBootstrap('10.0.0.3','root','k','h','t','10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',
+                         tls_files={'tls.crt':'c'})
+        with self.assertRaises(ValueError):
+            unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',client_ca=True)
+        with self.assertRaises(ValueError):
+            unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',allow_from=['not-a-cidr'])
+
     def test_cleanup_and_daemon_use_same_allowlist(self):
         text=self.bootstrap.unit
         self.assertIn('--ip 198.51.100.10/32',text)
@@ -77,9 +96,18 @@ class BootstrapCommandTests(unittest.TestCase):
             with self.assertLogs('zlb.bootstrap',level='ERROR'):
                 self.assertEqual(main(self.args()),1)
 
-    def test_requires_native_http_endpoint(self):
-        with self.assertRaises(SystemExit),patch('sys.stderr'):
-            main(self.args('https://10.0.0.3:9808'))
+    def test_https_endpoint_requires_matching_tls_files(self):
+        for args in (self.args('https://10.0.0.3:9808'),
+                     self.args()+['--tls-cert-file','/c','--tls-key-file','/k'],
+                     self.args('ftp://10.0.0.3')):
+            with self.subTest(args=args),self.assertRaises(SystemExit),patch('sys.stderr'):
+                main(args)
+        with patch('zlb.bootstrap.SSHBootstrap') as bootstrap:
+            self.assertEqual(main(self.args('https://10.0.0.3:9443')+['--tls-cert-file','/c','--tls-key-file','/k',
+                '--tls-client-ca-file','/ca','--allow-from','10.20.0.0/24']),0)
+            self.assertEqual(bootstrap.call_args.args[6],9443)
+            self.assertEqual(bootstrap.call_args.args[12],{'tls.crt':'/c','tls.key':'/k','client-ca.crt':'/ca'})
+            self.assertEqual([str(x) for x in bootstrap.call_args.args[13]],['10.20.0.0/24'])
 
     def test_controller_no_longer_accepts_ssh_material(self):
         from zlb import controller

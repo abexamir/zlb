@@ -18,9 +18,13 @@ LOG = logging.getLogger(__name__)
 
 
 class LoadBalancerNode:
-    def __init__(self, url, token_file, ca_file=None):
+    def __init__(self, url, token_file, ca_file=None, client_cert=None, client_key=None):
         self.url, self.token_file = url.rstrip("/") + "/v1/state", token_file
         self.context = ssl.create_default_context(cafile=ca_file)
+        self.context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if client_cert:
+            # Presented when the daemon runs with --tls-client-ca (mutual TLS).
+            self.context.load_cert_chain(client_cert, client_key)
 
     def apply(self, state):
         request = Request(self.url, data=canonical(state), method="POST", headers={
@@ -83,7 +87,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lb-node", required=True)
     parser.add_argument("--token-file", required=True)
-    parser.add_argument("--ca-file")
+    parser.add_argument("--ca-file", help="CA bundle that signed the daemon's HTTPS certificate")
+    parser.add_argument("--client-cert", help="Client certificate for a daemon that requires mTLS")
+    parser.add_argument("--client-key", help="Private key for --client-cert")
     allocation = parser.add_mutually_exclusive_group(required=True)
     allocation.add_argument("--ip", action="append", help="Simple unrestricted pool (repeat for multiple IPs)")
     allocation.add_argument("--pool-config", help="JSON file with named public pools and reservations")
@@ -95,10 +101,14 @@ def main():
     args = parser.parse_args()
     if not args.lb_node.startswith("https://") and not (args.allow_private_http and args.lb_node.startswith("http://")):
         parser.error("use HTTPS or explicitly allow private-network HTTP")
+    if bool(args.client_cert) != bool(args.client_key):
+        parser.error("--client-cert and --client-key must be used together")
+    if args.client_cert and not args.lb_node.startswith("https://"):
+        parser.error("client certificates require an https:// load balancer node URL")
     if args.interval < 1:
         parser.error("interval must be at least one second")
     logging.basicConfig(level=logging.INFO)
-    controller = Controller(Kubernetes(), LoadBalancerNode(args.lb_node, args.token_file, args.ca_file), args.ip, args.node_cidr, args.pool_config)
+    controller = Controller(Kubernetes(), LoadBalancerNode(args.lb_node, args.token_file, args.ca_file, args.client_cert, args.client_key), args.ip, args.node_cidr, args.pool_config)
     ready = Path(args.ready_file) if args.ready_file else None
     while True:
         try:

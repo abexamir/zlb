@@ -155,9 +155,9 @@ pools:
           service: ingress/edge
 ```
 
-Bootstrap requires private HTTP: the native daemon has no TLS listener. A preprovisioned
-installation can put an external TLS/mTLS proxy in front and use `lbNode.url: https://...`,
-with `lbNode.caConfigMap` if needed. Bootstrap's host and native API listener must describe
+This example uses private HTTP. For HTTPS, use an `https://` `lbNode.url` with
+`lbNode.caConfigMap` and set `bootstrap.tlsSecret`; see
+[securing the daemon API](installation.md#securing-the-daemon-api). Bootstrap's host and native API listener must describe
 reachable addresses on the same explicitly chosen LB machine.
 
 ```sh
@@ -903,7 +903,7 @@ forwarding through operator-controlled recovery before manually releasing zlb's 
   use `zlb.zarrino.tech/ip`. No per-Service arbitrary public-port annotation is implemented.
 - The 2 MiB API-body and listener/backend/range limits apply even if Kubernetes permits more
   objects. The poll loop's work duration adds to the configured sleep interval.
-- Native TLS, IPv6, provider-managed IP acquisition, route discovery, DNS management,
+- IPv6, provider-managed IP acquisition, route discovery, DNS management,
   public-port status annotations and automatic upstream ARP correction are not implemented.
 
 ## 13. Source map

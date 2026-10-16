@@ -8,10 +8,9 @@ from pathlib import Path
 import re
 import subprocess
 import threading
-from http.server import ThreadingHTTPServer
 
 from .addresses import Addresses
-from .http_api import make_handler, read_token
+from .http_api import APIServer, make_handler, read_token, server_context
 from .model import NODE_PORTS, VERSION, digest, port_range, validate_state
 
 LOG = logging.getLogger(__name__)
@@ -206,14 +205,30 @@ def main():
     parser.add_argument("--backend-port-range", type=port_range, default=NODE_PORTS,
                         help="Inclusive FIRST-LAST range backends may use; match the cluster's "
                              "NodePort range (default 30000-32767)")
+    parser.add_argument("--tls-cert", help="Serve HTTPS with this certificate chain (PEM)")
+    parser.add_argument("--tls-key", help="Private key for --tls-cert (PEM)")
+    parser.add_argument("--tls-client-ca", help="Require client certificates signed by this CA (mTLS)")
+    parser.add_argument("--allow-from", action="append", default=[], type=ipaddress.ip_network,
+                        help="Accept API connections only from this CIDR (repeatable; default any)")
+    parser.add_argument("--max-connections", type=int, default=16,
+                        help="Concurrent API connections; extra connections are closed")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()
     if not args.cleanup and not args.token_file:
         parser.error("--token-file is required when serving")
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("--tls-cert and --tls-key must be used together")
+    if args.tls_client_ca and not args.tls_cert:
+        parser.error("--tls-client-ca requires --tls-cert and --tls-key")
+    if args.max_connections < 1:
+        parser.error("--max-connections must be at least 1")
     logging.basicConfig(level=logging.INFO)
     applier = Applier(args.ip, args.node_cidr, args.public_interface, args.state_dir,
                       args.reserved_port + [args.port], args.table, args.backend_port_range)
     token = None if args.cleanup else read_token(args.token_file)
+    tls = None
+    if args.tls_cert and not args.cleanup:
+        tls = server_context(args.tls_cert, args.tls_key, args.tls_client_ca)
     runtime = Path("/run/zlb")
     runtime.mkdir(mode=0o700, exist_ok=True)
     with (runtime / (applier.table + ".lock")).open("a") as lock:
@@ -222,7 +237,8 @@ def main():
             applier.cleanup()
             return
         applier.initialize()
-        ThreadingHTTPServer((args.listen, args.port), make_handler(applier, token)).serve_forever()
+        APIServer((args.listen, args.port), make_handler(applier, token), tls,
+                  args.allow_from, args.max_connections).serve_forever()
 
 
 if __name__ == "__main__":
