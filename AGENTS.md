@@ -4,7 +4,8 @@ Use this file as the repository-wide maintainer guidance. Keep future agent inst
 here; user-facing documentation belongs in README.md and docs/.
 
 zlb is a reusable Kubernetes LoadBalancer controller plus Linux load balancer node DNAT daemon.
-The primary user entry point is README.md; installation and operating guides are in docs/.
+The primary user entry point is README.md; docs/guide.md is the operator guide and docs/internals.md
+the design reference. Keep docs short, with each fact in one place.
 Use charts/zlb for Kubernetes installation and examples/ for portable operator inputs.
 Installation-specific infrastructure and operating records belong outside this repository.
 Helm deploys the controller. Optional SSH bootstrap manages packages and the daemon on one
