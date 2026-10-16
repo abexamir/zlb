@@ -131,8 +131,9 @@ under `externalTrafficPolicy: Cluster`. Use `Local` and verify the complete pack
 workloads require the original client address.
 
 There is no IPv6, leader election, active backend probing, or general same-subnet hairpin
-solution. The daemon API supports native TLS and mutual TLS. Run one controller for one load balancer node state. Daemon process
-restarts preserve installed rules; a normal systemd stop explicitly cleans them up.
+solution. The daemon API supports native TLS and mutual TLS. Run one controller for one load balancer node state. Daemon crashes,
+upgrades and token rotations keep installed rules serving; only a deliberate
+`systemctl stop` removes them.
 See [architecture](docs/architecture.md) for failure behavior and address ownership.
 
 The `zlb.zarrino.tech/*` annotations and class name are stable API identifiers;

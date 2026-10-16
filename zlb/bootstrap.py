@@ -20,7 +20,7 @@ LOG = logging.getLogger(__name__)
 
 # This runs as root on the explicitly configured VM. Input is carried only on SSH stdin.
 REMOTE = r'''
-import fcntl,grp,hashlib,json,os,pathlib,pwd,shutil,subprocess,tempfile
+import fcntl,grp,hashlib,json,os,pathlib,pwd,shlex,shutil,subprocess,time
 p=json.load(__import__('sys').stdin)
 def run(*args): subprocess.run(args,check=True,stdout=subprocess.DEVNULL,timeout=600)
 with open('/run/zlb-bootstrap.lock','w') as lock:
@@ -69,42 +69,88 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
  pathlib.Path('/var/lib/zlb-bootstrap').mkdir(mode=0o700,parents=True,exist_ok=True)
  for name in p['files']:
   if pathlib.PurePath(name).name!=name or not name.endswith('.py'): raise ValueError('invalid package filename')
- with tempfile.TemporaryDirectory(prefix='backup-',dir='/var/lib/zlb-bootstrap') as directory:
-  backup=pathlib.Path(directory)
-  had_package=target.exists()
-  if had_package: shutil.copytree(target,backup/'package')
-  saved={path:path.read_bytes() if path.exists() else None for path in modes}
-  running=subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode==0
-  def write(path,data,mode):
-   path=pathlib.Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-   temporary=path.with_name('.'+path.name+'.new')
-   with open(temporary,'wb') as stream: stream.write(data);stream.flush();os.fsync(stream.fileno())
-   os.chown(temporary,0,gid if mode&0o077==0o040 else 0);os.chmod(temporary,mode);os.replace(temporary,path)
+ running=subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode==0
+ # The daemon re-reads its token for every request, so a token-only change needs no restart.
+ restart=not (running and unit.exists() and unit.read_text()==p['unit']
+   and all((etc/name).exists() and (etc/name).read_text()==data for name,data in p['tls'].items())
+   and not any(path.exists() for path in stale)
+   and set(x.name for x in target.glob('*.py'))==set(p['files'])
+   and all((target/name).read_text()==data for name,data in p['files'].items()))
+ # A managed restart must not tear forwarding down: the daemon's --cleanup skips this marker,
+ # and systemd deletes it with the runtime directory once the old process has stopped.
+ keep=pathlib.Path('/run/zlb/zlb.keep')
+ def write(path,data,mode):
+  path=pathlib.Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+  temporary=path.with_name('.'+path.name+'.new')
+  with open(temporary,'wb') as stream: stream.write(data);stream.flush();os.fsync(stream.fileno())
+  os.chown(temporary,0,gid if mode&0o077==0o040 else 0);os.chmod(temporary,mode);os.replace(temporary,path)
+ def install_package(source):
+  staging,old=target.with_name('zlb.new'),target.with_name('zlb.old')
+  for path in (staging,old):
+   if path.exists(): shutil.rmtree(path)
+  staging.mkdir(parents=True,mode=0o755)
+  for name,data in source.items(): write(staging/name,data,0o644)
+  if target.exists(): os.replace(target,old)
+  os.replace(staging,target)
+  if old.exists(): shutil.rmtree(old)
+ def start(was_running):
+  run('systemctl','enable','zlb-natd.service')
   try:
-   if unit.exists(): run('systemctl','stop','zlb-natd.service')
-   if target.exists(): shutil.rmtree(target)
-   target.mkdir(parents=True,mode=0o755)
-   for name,data in p['files'].items(): write(target/name,data.encode(),0o644)
-   for path,(data,mode) in config.items(): write(path,data.encode(),mode)
-   for path in stale: path.unlink(missing_ok=True)
-   write(unit,p['unit'].encode(),0o644)
-   write('/etc/sysctl.d/90-zlb-forwarding.conf',b'net.ipv4.ip_forward=1\n',0o644)
-   run('sysctl','-w','net.ipv4.ip_forward=1')
-   run('systemd-analyze','verify',str(unit))
-   run('systemctl','daemon-reload')
-   run('systemctl','enable','--now','zlb-natd.service')
+   if was_running:
+    if keep.parent.is_dir(): keep.write_text('managed restart\n')
+    run('systemctl','restart','zlb-natd.service')
+   else: run('systemctl','start','zlb-natd.service')
+  finally: keep.unlink(missing_ok=True)
+  # systemctl returns once the process is spawned; a daemon that fails while starting up is
+  # only visible a moment later.
+  for _ in range(3):
+   time.sleep(1)
    run('systemctl','is-active','--quiet','zlb-natd.service')
-   write(marker,(revision+'\n').encode(),0o600)
-  except Exception:
-   subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL)
-   if target.exists(): shutil.rmtree(target)
-   if had_package: shutil.copytree(backup/'package',target)
+ saved_package={x.name:x.read_bytes() for x in target.glob('*.py')} if target.exists() else None
+ saved={path:path.read_bytes() if path.exists() else None for path in modes}
+ swapped=False
+ try:
+  if restart:
+   install_package({name:data.encode() for name,data in p['files'].items()})
+   swapped=True
+  for path,(data,mode) in config.items(): write(path,data.encode(),mode)
+  for path in stale: path.unlink(missing_ok=True)
+  write(unit,p['unit'].encode(),0o644)
+  write('/etc/sysctl.d/90-zlb-forwarding.conf',b'net.ipv4.ip_forward=1\n',0o644)
+  run('sysctl','-w','net.ipv4.ip_forward=1')
+  run('systemd-analyze','verify',str(unit))
+  run('systemctl','daemon-reload')
+  if restart: start(running)
+  run('systemctl','is-active','--quiet','zlb-natd.service')
+  write(marker,(revision+'\n').encode(),0o600)
+ except Exception:
+  # Stop the candidate while its own code is still installed, so its cleanup decides what
+  # happens to forwarding: an existing deployment keeps it (keep marker); a failed first
+  # install removes whatever state the candidate created. Only then put the previous
+  # package, unit and files back and start the previous daemon. Rollback problems are
+  # reported without hiding the original failure.
+  try:
+   if swapped and running:
+    if keep.parent.is_dir(): keep.write_text('rollback\n')
+    subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL,timeout=600)
+    keep.unlink(missing_ok=True)
+   elif swapped:
+    subprocess.run(['systemctl','stop','zlb-natd.service'],stdout=subprocess.DEVNULL,timeout=600)
+    cleanup=next(line.split('=',1)[1] for line in p['unit'].splitlines() if line.startswith('ExecStopPost='))
+    environment={k:v for k,v in os.environ.items() if k!='SERVICE_RESULT'}
+    subprocess.run(shlex.split(cleanup),cwd=str(target.parent),env=environment,
+                   stdout=subprocess.DEVNULL,timeout=600)
+   if saved_package is not None: install_package(saved_package)
+   elif target.exists(): shutil.rmtree(target)
    for path,data in saved.items():
     if data is None: path.unlink(missing_ok=True)
     else: write(path,data,modes[path])
    run('systemctl','daemon-reload')
-   if running: run('systemctl','start','zlb-natd.service')
-   raise
+   if running and subprocess.run(['systemctl','is-active','--quiet','zlb-natd.service']).returncode:
+    run('systemctl','start','zlb-natd.service')
+  except Exception as rollback:
+   print('rollback failed: '+repr(rollback),file=__import__('sys').stderr)
+  raise
  print(json.dumps({'changed':True,'revision':revision}))
 '''
 
