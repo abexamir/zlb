@@ -8,6 +8,8 @@ PREFIX = "zlb.zarrino.tech/"
 FINALIZER = PREFIX + "cleanup"
 PROTOCOLS = {"TCP", "UDP", "SCTP"}
 VERSION = 2
+# Kubernetes' default --service-node-port-range. The controller only ever targets NodePorts.
+NODE_PORTS = (30000, 32767)
 
 
 def canonical(value):
@@ -24,6 +26,17 @@ def port(value):
     return value
 
 
+def port_range(value):
+    """Parse an inclusive FIRST-LAST port range such as 30000-32767."""
+    try:
+        first, last = (int(part) for part in str(value).split("-"))
+    except ValueError:
+        raise ValueError("port range must look like FIRST-LAST") from None
+    if port(first) > port(last):
+        raise ValueError("port range starts after its end")
+    return first, last
+
+
 def ipv4(value):
     address = ipaddress.ip_address(value)
     if address.version != 4:
@@ -31,8 +44,12 @@ def ipv4(value):
     return str(address)
 
 
-def validate_state(state, allowed_ips, node_cidr, forbidden_ports=()):
-    """Normalize the complete nftables input contract before touching the load balancer node."""
+def validate_state(state, allowed_ips, node_cidr, forbidden_ports=(), backend_ports=None):
+    """Normalize the complete nftables input contract before touching the load balancer node.
+
+    `backend_ports`, when given, is the inclusive range every backend port must fall in. The
+    daemon sets it to the cluster's NodePort range so that a stolen API token cannot publish
+    arbitrary node services such as the kubelet, etcd or SSH."""
     if not isinstance(state, dict) or set(state) != {"version", "listeners"}:
         raise ValueError("expected version and listeners")
     if type(state["version"]) is not int or state["version"] != VERSION:
@@ -64,7 +81,10 @@ def validate_state(state, allowed_ips, node_cidr, forbidden_ports=()):
             target = ipv4(backend["ip"])
             if ipaddress.ip_address(target) not in network:
                 raise ValueError("backend outside node CIDR")
-            backends.add((target, port(backend["port"])))
+            backend_port = port(backend["port"])
+            if backend_ports and not backend_ports[0] <= backend_port <= backend_ports[1]:
+                raise ValueError("backend port outside the allowed NodePort range")
+            backends.add((target, backend_port))
         ranges = item["source_ranges"]
         if not isinstance(ranges, list) or len(ranges) > 1024:
             raise ValueError("invalid source ranges")

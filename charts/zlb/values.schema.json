@@ -46,6 +46,15 @@
       "type": "number",
       "minimum": 1
     },
+    "bootstrap": {
+      "type": "object",
+      "properties": {
+        "backendPortRange": {
+          "type": "string",
+          "pattern": "^[0-9]{1,5}-[0-9]{1,5}$"
+        }
+      }
+    },
     "pools": {
       "type": "object",
       "required": [
