@@ -13,3 +13,4 @@ dist/
 kubeconfig*
 values.local.yaml
 .coverage
+.coverage.*
