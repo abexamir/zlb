@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from zlb.natd import Applier, listener_id, render, stable
-from zlb.model import VERSION, digest
+from zlb.model import compact, digest
 
 PUBLIC, CLIENT, CIDR = "198.51.100.10", "192.0.2.2", "10.20.0.0/24"
 NAMES = ["zlb-gw", "zlb-client", "zlb-n1", "zlb-n2"]
@@ -145,7 +145,7 @@ def main():
         a.initialize()
         assert ("zlb-wan", PUBLIC + "/32") in a.addresses.inventory()
         print("PASS: configured public IP assigned automatically to the load balancer node interface", flush=True)
-        state = {"version": VERSION, "listeners": [{"ip": PUBLIC, "port": 80, "protocol": proto,
+        state = {"version": 2, "listeners": [{"ip": PUBLIC, "port": 80, "protocol": proto,
             "source_ranges": [], "backends": [{"ip": "10.20.0.11", "port": 30080},
                                               {"ip": "10.20.0.12", "port": 30080}]}
             for proto in ("TCP", "UDP", "SCTP")]}
@@ -155,6 +155,15 @@ def main():
             assert all(x.split()[1] == CLIENT for x in responses), (proto, responses)
             assert Counter(x.split()[0] for x in responses) == {"10.20.0.11": 4, "10.20.0.12": 4}, (proto, responses)
             print(f"PASS: {proto} same-port forwarding, real source IP, even round robin", flush=True)
+        upgraded = compact([dict(x, backend_port=30080, backend_set=("10.20.0.11", "10.20.0.12"))
+                            for x in [{k: v for k, v in item.items() if k != "backends"} for item in state["listeners"]]])
+        assert a.snapshot()["comment"].startswith("zlb:v2:")
+        a.apply(upgraded)
+        assert a.snapshot()["comment"].startswith("zlb:v3:")
+        for proto in ("TCP", "UDP"):
+            assert request(proto).split()[1] == CLIENT
+        a.apply(state)
+        print("PASS: a v2-owned table is replaced by the equivalent compact v3 state and back", flush=True)
         tcp = "c_" + listener_id(state["listeners"][0])
         connections = a.counters()[tcp][0]
         assert connections >= 8, connections
@@ -234,7 +243,7 @@ def main():
         assert restarted.snapshot()["fingerprint"] == a.snapshot()["fingerprint"]
         assert restarted.addresses.owned == {PUBLIC + "/32"}
         print("PASS: restart preserves acknowledged forwarding and restores address ownership journal", flush=True)
-        restarted.apply({"version": VERSION, "listeners": []})
+        restarted.apply({"version": 2, "listeners": []})
         held.stdin.write("removed\n"); held.stdin.flush()
         assert read_line(held) == before
         assert outside() == baseline
