@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from zlb.addresses import Addresses
 from zlb.model import NODE_PORTS, VERSION, digest, port_range, validate_state
-from zlb.natd import Applier, host_guards, render, stable
+from zlb.natd import Applier, host_guards, layout, listener_id, render, stable
 from test_zlb import service, node, endpoint_slice, plan
 
 IP = "198.51.100.10"
@@ -24,8 +24,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(validated["listeners"]), 3)
         text = render(validated, CIDR)
         for proto in ("tcp", "udp", "sctp"):
-            self.assertIn(f"meta l4proto {proto} {proto} dport 80", text)
-            self.assertIn(f"ct original protocol {proto}", text)
+            # Listener identity, dispatch and filtering all include the protocol.
+            self.assertIn(f"{IP} . {proto} . 80 : jump l_", text)
+            self.assertIn(f"{IP} . {proto} . 80 : jump open", text)
+            self.assertIn(f"meta l4proto {proto} dnat ip to numgen inc mod 1 map", text)
+        self.assertEqual(len({listener_id(x) for x in validated["listeners"]}), 3)
         with self.assertRaises(ValueError):
             validate_state({"version": VERSION, "listeners": [state["listeners"][0]] * 2}, [IP], CIDR)
 
@@ -75,11 +78,30 @@ class ProtocolTests(unittest.TestCase):
     def test_source_ranges_and_empty_backend_filter_guard(self):
         state = copy.deepcopy(STATE)
         state["listeners"][0].update(source_ranges=["192.0.2.0/24"])
-        self.assertIn("ip saddr { 192.0.2.0/24 }", render(state, CIDR))
+        text = render(state, CIDR)
+        lid = listener_id(state["listeners"][0])
+        # The source range gates DNAT and the per-listener filter chain.
+        self.assertIn(f'ip saddr {{ 192.0.2.0/24 }} counter name "c_{lid}"', text)
+        self.assertIn(f"{IP} . tcp . 80 : jump a_{lid}", text)
+        self.assertIn(f"ip daddr {CIDR} ct status dnat ip saddr {{ 192.0.2.0/24 }} counter accept", text)
         state["listeners"][0]["backends"] = []
         text = render(state, CIDR)
-        self.assertIn("ct original proto-dst 80 counter drop", text)
-        self.assertNotIn("dnat to", text)
+        self.assertIn(f"{IP} . tcp . 80 : drop", text)
+        self.assertNotIn("dnat ip to", text)
+        self.assertEqual(layout(state, [IP])[1], {"dispatch": 0, "guard": 1})
+
+    def test_layout_is_constant_per_packet_and_one_chain_per_listener(self):
+        state = {"version": VERSION, "listeners": [
+            {"ip": IP, "port": 30000 + i, "protocol": "TCP", "source_ranges": ["192.0.2.0/24"] if i % 2 else [],
+             "backends": [{"ip": f"10.0.0.{b}", "port": 30000 + i} for b in range(1, 51)]} for i in range(20)]}
+        chains, maps, counters = layout(state, [IP], "wan0")
+        self.assertEqual(len(chains), 4 + 20 + 10)  # hooks + open, l_* per listener, a_* per ACL
+        self.assertEqual(chains["prerouting"], 1)
+        self.assertEqual(chains["input"], 1)
+        self.assertEqual(maps, {"dispatch": 20, "guard": 20})
+        self.assertEqual(len(counters), 20)
+        text = render(state, CIDR, allowed_ips=[IP], public_interface="wan0")
+        self.assertEqual(text.count("chain "), len(chains))
 
     def test_forward_guard_and_optional_public_isolation(self):
         text = render(STATE, CIDR, public_interface="wan0")
@@ -98,7 +120,7 @@ class ProtocolTests(unittest.TestCase):
     def test_only_owned_table_and_numeric_generators(self):
         text = render(STATE, CIDR)
         self.assertIn("table ip zlb", text)
-        self.assertIn("numgen inc mod 1 vmap", text)
+        self.assertIn("numgen inc mod 1 map", text)
         self.assertNotIn("flush ruleset", text)
         for name in ("bad;", "x\nflush ruleset", "X", "a" * 33):
             with self.assertRaises(ValueError):
@@ -208,8 +230,10 @@ class ApplyTests(unittest.TestCase):
         self.a.addresses = Mock(owned=set())
         self.a.install = Mock()
         self.a.verify = Mock()
-        self.actual = {"text": "table ip zlb {}", "fingerprint": "new", "comment": "revision"}
+        self.actual = {"fingerprint": "new", "comment": "revision"}
         self.a.snapshot = Mock(side_effect=[None, self.actual])
+        self.a.text = Mock(return_value="old table")
+        self.a.counters = Mock(return_value={})
 
     def test_validate_check_addresses_commit_verify_and_ack(self):
         self.assertEqual(self.a.apply(STATE), digest(STATE))
@@ -226,6 +250,7 @@ class ApplyTests(unittest.TestCase):
         self.a.install.assert_not_called()
         custom = Applier([IP], CIDR, "wan0", self.directory.name, backend_ports=(10000, 10999))
         custom.addresses, custom.install, custom.verify = Mock(owned=set()), Mock(), Mock()
+        custom.counters = Mock(return_value={})
         custom.snapshot = Mock(side_effect=[None, self.actual])
         state["listeners"][0]["backends"][0]["port"] = 10250
         self.assertEqual(custom.apply(state), digest(state))
@@ -236,7 +261,7 @@ class ApplyTests(unittest.TestCase):
         self.a.addresses.add.assert_not_called()
 
     def test_post_commit_failure_restores_previous_table_and_addresses(self):
-        old = {"text": "old table", "fingerprint": "old"}
+        old = {"fingerprint": "old"}
         self.a.snapshot.side_effect = [old, self.actual, self.actual, old]
         self.a.verify.side_effect = RuntimeError("readback failure")
         with self.assertRaises(RuntimeError): self.a.apply(STATE)
@@ -244,7 +269,7 @@ class ApplyTests(unittest.TestCase):
         self.a.addresses.restore.assert_called_once_with(set())
 
     def test_address_rollback_failure_does_not_skip_firewall_rollback(self):
-        old = {"text": "old table", "fingerprint": "old"}
+        old = {"fingerprint": "old"}
         self.a.snapshot.side_effect = [old, self.actual, self.actual, old]
         self.a.verify.side_effect = RuntimeError("readback failure")
         self.a.addresses.restore.side_effect = OSError("address failure")
@@ -253,11 +278,24 @@ class ApplyTests(unittest.TestCase):
                 self.a.apply(STATE)
         self.assertEqual(self.a.install.call_args.args[0], "old table")
 
-    def test_drift_reapplied_and_identical_state_skips_commit(self):
+    def test_identical_state_skips_render_check_and_commit(self):
         self.a.current_digest, self.a.last_fingerprint = digest(STATE), "new"
-        self.a.snapshot.side_effect = [self.actual, self.actual]
+        self.a.snapshot.side_effect = [self.actual]
+        self.assertEqual(self.a.apply(STATE), digest(STATE))
+        self.a.install.assert_not_called()
+        self.a.text.assert_not_called()
+        self.a.counters.assert_not_called()
+        self.a.addresses.add.assert_called_once()
+
+    def test_drift_is_reapplied_and_counters_carried_over(self):
+        self.a.current_digest, self.a.last_fingerprint = digest(STATE), "new"
+        drifted = {"fingerprint": "tampered", "comment": "revision"}
+        self.a.snapshot.side_effect = [drifted, self.actual]
+        lid = listener_id(STATE["listeners"][0])
+        self.a.counters.return_value = {"c_" + lid: (42, 4200)}
         self.a.apply(STATE)
-        self.assertEqual(self.a.install.call_count, 1)  # dry-run only
+        self.assertEqual(self.a.install.call_count, 2)
+        self.assertIn(f"counter c_{lid} {{ packets 42 bytes 4200 }}", self.a.install.call_args.args[0])
 
     def test_cleanup_requires_ownership_snapshot(self):
         self.a.snapshot.side_effect = RuntimeError("foreign table")
