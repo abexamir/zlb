@@ -199,6 +199,38 @@ sequenceDiagram
 | Hairpin | In-cluster clients calling a public IP get the reply straight from the backend and drop it. `--hairpin-snat-from CIDR` (`bootstrap.hairpinSnatFrom`: the node CIDR, plus the Pod CIDR if your CNI does not SNAT Pod egress) masquerades only connections from those sources to a zlb listener's (IP, protocol, port). External clients, your own DNAT and `loadBalancerSourceRanges` still see the original source. The VM cannot test its own public IPs. |
 | Protocols | TCP, UDP and SCTP may share a port number. SCTP needs kernel and CNI support (e.g. [Cilium](https://docs.cilium.io/en/stable/configuration/sctp/)); multihoming is not claimed. |
 
+### Optional LB routes
+
+zlb can manage explicit IPv4 routes in the load balancer node's main routing table.
+For a dedicated VM with a public uplink and a separate management network:
+
+```yaml
+bootstrap:
+  routes:
+    - destination: 10.0.0.0/8
+      interface: eth1
+      gateway: 10.0.0.1
+    - destination: 0.0.0.0/0
+      interface: eth0
+      gateway: 198.51.100.1
+```
+
+Management return routes are installed before the public default. Declare every private
+network needed for SSH and API replies; the public default changes the VM's ordinary
+internet egress too. Gateway routes use `onlink`, supporting public IPs assigned as /32s.
+The daemon needs no extra privilege beyond its existing `CAP_NET_ADMIN`.
+
+This is opt-in: `bootstrap.routes: []` leaves an unclaimed routing table alone. zlb
+journals each changed destination and its previous route, verifies readback, and repairs
+drift on reconciliation. Removing a configured route or cleanly stopping the daemon
+restores its previous route; a matching preexisting route is never claimed or deleted.
+Connected kernel routes, multipath routes and multiple routes for one managed destination
+are refused. Keep the state directory persistent. Preprovisioned daemons accept repeated
+`--route` JSON objects with `destination`, `interface` and optional `gateway`.
+
+These settings configure only the LB itself. A separate router must still send inbound
+replies through it; zlb never configures another machine's routing or firewall.
+
 ## Configure pools and Services
 
 ### Pools
