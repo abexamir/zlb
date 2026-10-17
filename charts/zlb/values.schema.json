@@ -84,6 +84,30 @@
             "type": "string",
             "pattern": "^[0-9.]+/[0-9]+$"
           }
+        },
+        "routes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "destination",
+              "interface"
+            ],
+            "properties": {
+              "destination": {
+                "type": "string"
+              },
+              "interface": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,15}$"
+              },
+              "gateway": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },

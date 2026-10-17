@@ -95,6 +95,9 @@ spec:
         {{- range .Values.bootstrap.hairpinSnatFrom }}
         - {{ printf "--hairpin-snat-from=%s" . | quote }}
         {{- end }}
+        {{- range .Values.bootstrap.routes }}
+        - {{ printf "--route=%s" (toJson .) | quote }}
+        {{- end }}
       resources:
         {{- toYaml .Values.bootstrap.resources | nindent 8 }}
       securityContext:

@@ -4,5 +4,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends nftables iprout
     && ln -s /usr/local/bin/python3 /usr/bin/python3
 WORKDIR /src
 COPY zlb ./zlb
-COPY tests/verify_nat.py tests/verify_bootstrap.py ./tests/
-ENTRYPOINT ["sh", "-c", "python3 tests/verify_nat.py && python3 tests/verify_bootstrap.py"]
+COPY tests/verify_nat.py tests/verify_bootstrap.py tests/verify_routes.py ./tests/
+ENTRYPOINT ["sh", "-c", "python3 tests/verify_routes.py && python3 tests/verify_nat.py && python3 tests/verify_bootstrap.py"]

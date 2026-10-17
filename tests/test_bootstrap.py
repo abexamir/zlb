@@ -85,6 +85,14 @@ class BootstrapTests(unittest.TestCase):
         example=(Path(__file__).parents[1]/'examples/systemd/zlb-natd.service').read_text()
         self.assertIn(sandbox(['CAP_NET_ADMIN']),example)
 
+    def test_opt_in_routes_are_validated_and_passed_to_both_unit_commands(self):
+        wanted={'destination':'0.0.0.0/0','interface':'eth1','gateway':'198.51.100.1'}
+        text=unit('10.0.0.3',9808,['198.51.100.10'],'eth1','10.0.0.0/24',routes=[wanted])
+        self.assertEqual(text.count('--route'),2)
+        self.assertIn('198.51.100.1',text)
+        with self.assertRaises(ValueError):
+            unit('10.0.0.3',9808,['198.51.100.10'],'eth1','10.0.0.0/24',routes=[dict(wanted,interface='bad%h')])
+
     def test_host_guard_flags(self):
         self.assertNotIn('--allow-foreign-forwarding',self.bootstrap.unit)
         text=unit('10.0.0.3',9808,['198.51.100.10'],'nic1','10.0.0.0/24',allow_foreign_forwarding=True,isolate_public=True)

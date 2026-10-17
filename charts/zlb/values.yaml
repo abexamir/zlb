@@ -81,6 +81,9 @@ bootstrap:
   # Optional cron schedule for a drift-repair CronJob (e.g. "0 * * * *"). Empty runs the
   # bootstrap only on Helm install and upgrade.
   schedule: ""
+  # Optional main-table routes on the LB. Install management return routes alongside
+  # a public default route to preserve SSH/API access. Previous routes are journaled.
+  routes: []
   resources:
     requests:
       cpu: 10m
