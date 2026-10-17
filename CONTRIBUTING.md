@@ -11,7 +11,7 @@ real infrastructure addresses or deployment state.
 | `zlb/controller.py`, `cache.py`, `kube.py` | reconcile loop, watch caches, Kubernetes API |
 | `zlb/compiler.py`, `pools.py` | pure Service/Node/EndpointSlice → listener compiler, pool policy |
 | `zlb/model.py` | wire format, validation, digests |
-| `zlb/natd.py`, `addresses.py`, `http_api.py` | daemon: nftables, address journal, HTTP API |
+| `zlb/natd.py`, `addresses.py`, `routes.py`, `http_api.py` | daemon: nftables, address journal, HTTP API |
 | `zlb/bootstrap.py`, `quiesce.py` | SSH bootstrap and its upgrade quiesce hook |
 | `charts/zlb/` | Helm chart |
 | `scripts/` | `check_docs.py`, `check_chart.py`, `package_chart.py` |
@@ -44,7 +44,7 @@ docker run --rm --privileged --network none zlb-nat-test:local
 ```
 
 `verify_nat.py` builds disposable namespaces, veths and a bridge and checks real packets:
-TCP/UDP/SCTP forwarding with client source preserved, ACLs, empty-backend guards, the
+optional main-table route ownership, drift repair and restoration; TCP/UDP/SCTP forwarding with client source preserved, ACLs, empty-backend guards, the
 forward guard, isolation, hairpin SNAT, counters, drift repair, rollback, crash-safe cleanup
 and untouched unrelated tables. `verify_bootstrap.py` runs the real bootstrap remote script
 against a real daemon with a minimal `systemctl` stand-in: first install, token rotation,

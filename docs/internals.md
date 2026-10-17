@@ -369,3 +369,13 @@ flag; the nftables datapath already fits.
 | [http_api.py](../zlb/http_api.py) | authentication, TLS, endpoints, limits |
 | [bootstrap.py](../zlb/bootstrap.py), [quiesce.py](../zlb/quiesce.py) | SSH bootstrap, generated unit, rollback; upgrade quiesce hook |
 | [charts/zlb/templates](../charts/zlb/templates) | Deployment, RBAC, admission policy, bootstrap and quiesce hooks |
+
+## Optional route ownership
+
+`routes.py` manages only explicit main-table destinations from the daemon's `--route`
+arguments. Its `<table>-routes.json` journal records the previous and installed route;
+preexisting matches remain unowned. Management exceptions are applied before the default,
+with readback before acknowledgement. Failed changes restore the captured routes; clean
+shutdown restores the original default before removing management exceptions. Managed
+restarts retain both routes and forwarding. Foreign destinations are untouched. This
+feature does not discover provider gateways, edit policy rules or configure other routers.

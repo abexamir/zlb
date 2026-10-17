@@ -39,3 +39,6 @@ The public-facing forwarding machine is called the **load balancer node**. Renam
 `gateway` values block to `lbNode` and the controller endpoint flag to `--lb-node`; the old
 values key is rejected. The historical `zlb.zarrino.tech/gateway` LoadBalancer class remains
 accepted for existing Services; it is not the node endpoint setting.
+
+Optional `bootstrap.routes` manages explicit main-table IPv4 routes on the LB; see
+[LB routes](../../docs/guide.md#optional-lb-routes). The default is disabled.
