@@ -86,7 +86,7 @@ def isolate():
     run("mount", "-t", "overlay", "overlay", "-o",
         "lowerdir=/etc,upperdir=/tmp/zlb-harness-etc/upper,workdir=/tmp/zlb-harness-etc/work", "/etc")
     for path in ("/opt", "/etc/zlb", "/etc/systemd/system", "/var/lib/zlb-bootstrap", "/var/lib/zlb",
-                 "/etc/sysctl.d", str(HARNESS), "/run/zlb"):
+                 "/etc/sysctl.d", "/etc/systemd/networkd.conf.d", str(HARNESS), "/run/zlb"):
         os.makedirs(path, exist_ok=True)
         run("mount", "-t", "tmpfs", "tmpfs", path)
     bin = HARNESS / "bin"

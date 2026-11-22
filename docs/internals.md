@@ -35,7 +35,7 @@ flowchart LR
 | Helm | controller Deployment, ServiceAccount, RBAC, pool ConfigMap; on 1.30+ the admission policy; with bootstrap the hook Job, optional CronJob and quiesce hook. Not the Secrets or the VM. |
 | Controller | listeners, its `zlb.zarrino.tech/cleanup` finalizer, `status.loadBalancer.ingress`, the `zlb.zarrino.tech/published-ports` annotation, Warning Events. Never NodePorts, Service types or policies. |
 | Daemon | one nftables table and the interface addresses it added. Its IP and backend allowlists are independent of the controller's pools. |
-| Bootstrap | on the VM: package, `zlb-natd` user, token and TLS files, unit, forwarding sysctl, revision marker. |
+| Bootstrap | on the VM: package, `zlb-natd` user, token and TLS files, unit, forwarding sysctl, networkd drop-in, revision marker. |
 | Infrastructure | the VM, NICs, upstream addresses and routes, return routing, firewall, SSH access and host keys. |
 
 The admission policy exists because RBAC cannot limit `patch services` to fields: it lets
@@ -215,7 +215,12 @@ daemon outage leaves existing rules serving.
 ### Return routing example
 
 With a separate egress router, infrastructure (not zlb) must steer NodePort replies back to
-the VM. One way, assuming router node-side `10.0.0.1`, VM node-side `10.0.0.3`, router
+the VM, and keep doing so: without it every listener goes one-way at once. The `ip rule` and
+`ip route` commands below are runtime state, gone after a reboot. A systemd-networkd restart
+deletes them too unless `ManageForeignRoutingPolicyRules=no` and `ManageForeignRoutes=no` are
+set (a drop-in in `/etc/systemd/networkd.conf.d/`). Install them from a unit, and re-apply them
+on a timer so anything else that removes them is undone. Alternatively, declare them in the
+router's network manager (networkd `[RoutingPolicyRule]` and `[Route]` with `Table=`). One way, assuming router node-side `10.0.0.1`, VM node-side `10.0.0.3`, router
 interface `rtr-nodes0`, VM node-facing interface `node0` and provider gateway
 `198.51.100.1` on `eth0`:
 
@@ -280,9 +285,12 @@ pod verifies. The shell wrapper installs `python3` with apt if it is missing; th
 2. Installs `nftables` and `iproute2` with apt if missing and creates the `zlb-natd` user.
 3. If the package, unit or TLS files changed or the daemon is not running, stages the package as `/opt/zlb/zlb.new` and
    swaps it in.
-4. Writes the token and TLS files (key and token `root:zlb-natd` 0640), the unit and
-   `/etc/sysctl.d/90-zlb-forwarding.conf` atomically, then runs `sysctl -w`,
-   `systemd-analyze verify` and `daemon-reload`.
+4. Writes the token and TLS files (key and token `root:zlb-natd` 0640), the unit,
+   `/etc/sysctl.d/90-zlb-forwarding.conf` and `/etc/systemd/networkd.conf.d/50-zlb.conf`
+   atomically, then runs `sysctl -w`, `systemd-analyze verify` and `daemon-reload`. The
+   networkd drop-in (`ManageForeignRoutingPolicyRules=no`, `ManageForeignRoutes=no`) stops
+   systemd-networkd deleting zlb-natd's routes when it restarts, as an unattended systemd upgrade
+   does; networkd reads it at its next start.
 5. Only in that case: enables the unit, writes `/run/zlb/zlb.keep` if
    the daemon was running, starts or restarts it, and checks `is-active` for three seconds.
    A token-only change needs no restart; the daemon re-reads its token per request.
