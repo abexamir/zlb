@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from zlb.bootstrap import SSHBootstrap,main,sandbox,unit
+from zlb.bootstrap import REMOTE,SSHBootstrap,main,sandbox,unit
 from zlb.model import digest
 
 
@@ -84,6 +84,14 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn('AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE',privileged)
         example=(Path(__file__).parents[1]/'examples/systemd/zlb-natd.service').read_text()
         self.assertIn(sandbox(['CAP_NET_ADMIN']),example)
+
+    def test_networkd_keeps_zlb_routes_across_restarts(self):
+        # systemd-networkd deletes routes and rules it didn't create when it restarts.
+        self.assertIn("networkd=pathlib.Path('/etc/systemd/networkd.conf.d/50-zlb.conf')",REMOTE)
+        for line in ('ManageForeignRoutingPolicyRules=no','ManageForeignRoutes=no'):
+            self.assertIn(line,REMOTE)
+        # Checked as part of a healthy install, so existing VMs get it on the next run.
+        self.assertIn('networkd.read_text()==networkd_data',REMOTE)
 
     def test_opt_in_routes_are_validated_and_passed_to_both_unit_commands(self):
         wanted={'destination':'0.0.0.0/0','interface':'eth1','gateway':'198.51.100.1'}

@@ -29,6 +29,12 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
  revision=hashlib.sha256(json.dumps(p,sort_keys=True,separators=(',',':')).encode()).hexdigest()
  marker=pathlib.Path('/var/lib/zlb-bootstrap/revision')
  unit=pathlib.Path('/etc/systemd/system/zlb-natd.service')
+ # systemd-networkd deletes routes and policy rules it didn't create whenever it restarts (an
+ # unattended systemd upgrade restarts it). zlb-natd's routes would then be gone until the next
+ # reconciliation. Read at networkd's next start; harmless where networkd isn't used.
+ networkd=pathlib.Path('/etc/systemd/networkd.conf.d/50-zlb.conf')
+ networkd_data=('# zlb: keep zlb-natd\'s routes and policy rules when systemd-networkd restarts.\n'
+   '[Network]\nManageForeignRoutingPolicyRules=no\nManageForeignRoutes=no\n')
  target=pathlib.Path('/opt/zlb/zlb')
  etc=pathlib.Path('/etc/zlb')
  # Secrets are root-owned and readable by the daemon's group (0640); certificates are public.
@@ -37,7 +43,7 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
  config={etc/'token':(p['token']+'\n',0o640)}
  config.update({etc/name:(data,tls_modes[name]) for name,data in p['tls'].items()})
  stale=[etc/name for name in tls_modes if name not in p['tls']]
- modes={unit:0o644,marker:0o600,**{path:mode for path,(data,mode) in config.items()},
+ modes={unit:0o644,marker:0o600,networkd:0o644,**{path:mode for path,(data,mode) in config.items()},
   **{etc/name:mode for name,mode in tls_modes.items() if name not in p['tls']}}
  def group():
   try: return grp.getgrnam('zlb-natd').gr_gid
@@ -49,6 +55,7 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
   return (marker.exists() and marker.read_text().strip()==revision and unit.exists() and group() is not None
     and all(path.exists() and owned(path,mode) for path,(data,mode) in config.items())
     and unit.read_text()==p['unit']
+    and networkd.exists() and networkd.read_text()==networkd_data
     and all(path.exists() and path.read_text()==data for path,(data,mode) in config.items())
     and not any(path.exists() for path in stale)
     and all((target/name).exists() and (target/name).read_text()==data for name,data in p['files'].items())
@@ -118,6 +125,7 @@ with open('/run/zlb-bootstrap.lock','w') as lock:
   for path in stale: path.unlink(missing_ok=True)
   write(unit,p['unit'].encode(),0o644)
   write('/etc/sysctl.d/90-zlb-forwarding.conf',b'net.ipv4.ip_forward=1\n',0o644)
+  write(networkd,networkd_data.encode(),0o644)
   run('sysctl','-w','net.ipv4.ip_forward=1')
   run('systemd-analyze','verify',str(unit))
   run('systemctl','daemon-reload')

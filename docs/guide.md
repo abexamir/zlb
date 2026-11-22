@@ -194,7 +194,7 @@ sequenceDiagram
 
 | Topic | What to know |
 | --- | --- |
-| Return path | The client source is preserved, so node replies must route back through the VM. With a separate egress router, add return routing ([example](internals.md#return-routing-example)). |
+| Return path | The client source is preserved, so node replies must route back through the VM. With a separate egress router, add return routing ([example](internals.md#return-routing-example)) and make it survive reboots and network-manager restarts: losing it makes every listener one-way. |
 | Client address | `externalTrafficPolicy: Cluster` may SNAT on the node; use `Local` to keep the client IP. |
 | Hairpin | In-cluster clients calling a public IP get the reply straight from the backend and drop it. `--hairpin-snat-from CIDR` (`bootstrap.hairpinSnatFrom`: the node CIDR, plus the Pod CIDR if your CNI does not SNAT Pod egress) masquerades only connections from those sources to a zlb listener's (IP, protocol, port). External clients, your own DNAT and `loadBalancerSourceRanges` still see the original source. The VM cannot test its own public IPs. |
 | Protocols | TCP, UDP and SCTP may share a port number. SCTP needs kernel and CNI support (e.g. [Cilium](https://docs.cilium.io/en/stable/configuration/sctp/)); multihoming is not claimed. |
@@ -444,6 +444,7 @@ flowchart LR
 | IP assigned, connection times out | Service port used instead of the published port; counter flat (upstream routing); NodePort unreachable from the VM; a drop-policy forward chain elsewhere |
 | Listener has no backends | Node Ready, exclusion label, InternalIP outside the node CIDR; for `Local`, EndpointSlice readiness and port names |
 | Wrong client IP or one-way traffic | Replies bypass the VM; `Cluster` SNAT; in-cluster clients need hairpin SNAT |
+| Every listener times out, ping still works | The router lost its return routing (reboot, network-manager restart). On the VM, `conntrack -L` shows listener flows `[UNREPLIED]` while the VM reaches the NodePorts itself; on the router, check the `ip rule` and its table |
 | Listener collision Event | A reserved port equals another Service's NodePort; keep reservations outside the NodePort range |
 | Deletion hangs | The daemon must acknowledge removal before the finalizer goes |
 | Old connection survives a change | Expected; conntrack flows finish. Test with a new connection |
